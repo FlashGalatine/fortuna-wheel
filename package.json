@@ -1,7 +1,7 @@
 {
   "name": "fortuna-wheel",
   "version": "0.1.0",
-  "description": "Fortuna — a Wheel of Fate randomizer overlay for OBS, driven by Streamer.bot",
+  "description": "Fortuna — a Wheel of Fate randomizer browser-source overlay, driven by Streamer.bot",
   "type": "module",
   "license": "MIT",
   "author": "Ashe \"Flash\" Galatine <AsheJunius@gmail.com>",

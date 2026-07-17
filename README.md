@@ -1,6 +1,7 @@
-# Fortuna — a Wheel of Fate for OBS, driven by Streamer.bot
+# Fortuna — a Wheel of Fate overlay, driven by Streamer.bot
 
-Fortuna is a randomizer-wheel overlay: load it with names, objectives, or
+Fortuna is a randomizer-wheel browser-source overlay (OBS, Streamlabs, or any
+Chromium ≥ 80 streaming app): load it with names, objectives, or
 stipulations, hit **SPIN**, and the wheel decelerates onto a result. Entries
 carry a *good / bad / neutral* tag — a good draw pops confetti, a bad draw
 pours rain, neutral gets a subtle glow (all re-skinnable). Viewers can enter
@@ -114,7 +115,17 @@ launches harmless.
 | 7493 | Sidecar single-instance guard (`FORTUNA_GUARD_PORT`) |
 | 7478 / 8084 / 7494 | verify-suite off-default ports |
 
-## License
+## Author & support
 
-MIT — see [LICENSE](LICENSE). Third-party notices in
+Built by **Ashe "Flash" Galatine**.
+
+- Email — [AsheJunius@gmail.com](mailto:AsheJunius@gmail.com)
+- X — [@AsheJunius](https://x.com/AsheJunius) · BlueSky — [@projectgalatine.com](https://bsky.app/profile/projectgalatine.com)
+- Twitch — [FlashGalatine](https://www.twitch.tv/FlashGalatine) · Discord — [Newbie Fight Club](https://discord.gg/NewbieFightClub)
+- Support — Patreon [ProjectGalatine](https://www.patreon.com/ProjectGalatine) · CashApp [$ProjectGalatine](https://cash.app/$ProjectGalatine)
+
+## Credits & license
+
+MIT — see [LICENSE](LICENSE). Sole runtime dependency is
+[ws](https://github.com/websockets/ws) (MIT). See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
