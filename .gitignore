@@ -1,0 +1,7 @@
+# Local state (entries, settings, last spin) — seeded from config.example.json
+config.json
+
+node_modules/
+test-render*.png
+test-live*.png
+control-render*.png

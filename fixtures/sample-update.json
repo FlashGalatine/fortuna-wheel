@@ -1,0 +1,18 @@
+{
+  "type": "fortuna:update",
+  "revision": 12,
+  "generatedAt": "2026-07-16T20:00:00.000Z",
+  "entries": [
+    { "id": "e_fix1", "label": "Win with no jumping", "tag": "bad", "source": "streamer" },
+    { "id": "e_fix2", "label": "Viewer picks your character", "tag": "neutral", "source": "streamer" },
+    { "id": "e_fix3", "label": "Free choice", "tag": "good", "source": "streamer" },
+    { "id": "e_fix4", "label": "Random select only", "tag": "bad", "source": "streamer" },
+    { "id": "e_fix5", "label": "Winner stays on", "tag": "neutral", "source": "streamer" },
+    { "id": "e_fix6", "label": "chatter_99", "tag": "good", "source": "chat", "user": "chatter_99", "userId": "u99" },
+    { "id": "e_fix7", "label": "pixel_pal", "tag": "good", "source": "chat", "user": "pixel_pal", "userId": "u42" },
+    { "id": "e_fix8", "label": "Throws only, honest", "tag": "bad", "source": "streamer" }
+  ],
+  "entryMode": { "open": false, "maxEntries": 25, "windowSec": 0, "closesAt": null },
+  "settings": { "removeOnDraw": false, "defaultChatTag": "good" },
+  "spin": null
+}

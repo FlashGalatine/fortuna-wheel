@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fortuna — Wheel of Fate</title>
+<link rel="stylesheet" href="wheel.css">
+</head>
+<body>
+  <!-- Full-viewport effect layer (confetti / rain) — themes may repaint or replace it. -->
+  <canvas id="fx" class="fx"></canvas>
+
+  <main class="stage">
+    <div class="wheel-wrap">
+      <canvas id="wheel" class="wheel"></canvas>
+      <div class="pointer" aria-hidden="true"></div>
+      <div class="hub" aria-hidden="true"></div>
+    </div>
+
+    <!-- Result reveal card — populated at the end of a spin. -->
+    <div id="reveal" class="reveal" hidden>
+      <div class="reveal-kicker">The wheel has spoken</div>
+      <div id="reveal-label" class="reveal-label"></div>
+    </div>
+
+    <!-- Viewer-drawing banner while entries are open. -->
+    <div id="entries-banner" class="entries-banner" hidden>
+      <span class="entries-cmd">!entry</span>
+      <span id="entries-count" class="entries-count"></span>
+    </div>
+  </main>
+
+  <script>
+    // Served from Streamer.bot's HTTP server: the shared transport lives under
+    // the /fortuna-shared/ map, so the path is absolute on purpose.
+    // window.__SB_WS_URL / ?sbport=<n> override the SB WebSocket URL.
+  </script>
+  <script src="spin-math.js"></script>
+  <script src="effects.js"></script>
+  <script src="/fortuna-shared/panel-core.js"></script>
+  <script src="wheel.js"></script>
+</body>
+</html>

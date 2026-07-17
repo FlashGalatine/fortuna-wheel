@@ -1,0 +1,21 @@
+{
+  "name": "fortuna-wheel",
+  "version": "0.1.0",
+  "description": "Fortuna — a Wheel of Fate randomizer overlay for OBS, driven by Streamer.bot",
+  "type": "module",
+  "license": "MIT",
+  "author": "Ashe \"Flash\" Galatine <AsheJunius@gmail.com>",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node mock-sb-server.mjs",
+    "sidecar": "node fortuna-sidecar.mjs",
+    "verify": "node verify.mjs",
+    "verify:render": "node verify-render.mjs",
+    "shots": "node tools/shots.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

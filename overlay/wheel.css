@@ -1,0 +1,173 @@
+/* Fortuna wheel overlay — every knob a theme designer needs is a CSS custom
+ * property (docs/THEMING.md). The wheel itself is painted on a canvas, but the
+ * canvas READS these variables via getComputedStyle, so a pure-CSS re-skin
+ * still recolors the segments, rim, labels, pointer, and hub. */
+
+:root {
+  /* Geometry */
+  --fortuna-wheel-size: 640px;        /* wheel diameter */
+  --fortuna-rim-width: 14px;          /* outer ring painted around the segments */
+
+  /* Segment fills — cycled in order around the wheel. Comma-separated list. */
+  --fortuna-seg-colors: #3d348b, #7678ed, #f7b801, #f18701, #f35b04;
+  /* Per-tag accent used for the thin tag stripe at each segment's rim. */
+  --fortuna-tag-good: #35d07f;
+  --fortuna-tag-bad: #e5484d;
+  --fortuna-tag-neutral: #8d8d99;
+
+  --fortuna-rim-color: #1b1b2f;
+  --fortuna-seg-line: rgba(0, 0, 0, .35); /* divider stroke between segments */
+  --fortuna-label-color: #ffffff;
+  --fortuna-label-font: 600 22px "Segoe UI", system-ui, sans-serif;
+
+  --fortuna-pointer-color: #ffd166;
+  --fortuna-pointer-size: 36px;
+  --fortuna-hub-color: #1b1b2f;
+  --fortuna-hub-size: 84px;
+
+  /* Reveal card */
+  --fortuna-reveal-bg: rgba(16, 16, 28, .92);
+  --fortuna-reveal-ink: #ffffff;
+  --fortuna-reveal-accent: #ffd166;
+  --fortuna-reveal-font: 800 44px "Segoe UI", system-ui, sans-serif;
+  --fortuna-reveal-kicker-font: 600 18px "Segoe UI", system-ui, sans-serif;
+
+  /* Entries-open banner */
+  --fortuna-banner-bg: rgba(16, 16, 28, .85);
+  --fortuna-banner-ink: #ffffff;
+  --fortuna-banner-accent: #7678ed;
+
+  /* Effects (read by effects.js) */
+  --fortuna-fx-good-colors: #ffd166, #35d07f, #7678ed, #f35b04, #ffffff;
+  --fortuna-fx-bad-color: #6ea8d8;
+  --fortuna-fx-neutral-glow: #ffd166;
+  --fortuna-fx-duration: 4000; /* ms the reveal effect runs */
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+.fx {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 30;
+}
+
+.stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+}
+
+.wheel-wrap {
+  position: relative;
+  width: var(--fortuna-wheel-size);
+  height: var(--fortuna-wheel-size);
+}
+
+.wheel { width: 100%; height: 100%; display: block; }
+
+/* Pointer: a downward triangle at 12 o'clock, overlapping the rim. */
+.pointer {
+  position: absolute;
+  top: calc(var(--fortuna-pointer-size) / -2.5);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: calc(var(--fortuna-pointer-size) / 2) solid transparent;
+  border-right: calc(var(--fortuna-pointer-size) / 2) solid transparent;
+  border-top: var(--fortuna-pointer-size) solid var(--fortuna-pointer-color);
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, .5));
+  z-index: 10;
+}
+
+.hub {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: var(--fortuna-hub-size);
+  height: var(--fortuna-hub-size);
+  border-radius: 50%;
+  background: var(--fortuna-hub-color);
+  border: 4px solid var(--fortuna-pointer-color);
+  box-shadow: 0 0 18px rgba(0, 0, 0, .55);
+  z-index: 5;
+}
+
+.reveal {
+  padding: 22px 46px;
+  border-radius: 14px;
+  background: var(--fortuna-reveal-bg);
+  border: 2px solid var(--fortuna-reveal-accent);
+  text-align: center;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .5);
+  animation: fortuna-reveal-pop .45s cubic-bezier(.2, 1.6, .4, 1) both;
+  z-index: 20;
+}
+.reveal-kicker {
+  font: var(--fortuna-reveal-kicker-font);
+  color: var(--fortuna-reveal-accent);
+  letter-spacing: .18em;
+  text-transform: uppercase;
+}
+.reveal-label {
+  font: var(--fortuna-reveal-font);
+  color: var(--fortuna-reveal-ink);
+  margin-top: 6px;
+  max-width: 70vw;
+  overflow-wrap: break-word;
+}
+/* Tag tint on the card border. */
+.reveal.tag-good { border-color: var(--fortuna-tag-good); }
+.reveal.tag-bad { border-color: var(--fortuna-tag-bad); }
+.reveal.tag-good .reveal-kicker { color: var(--fortuna-tag-good); }
+.reveal.tag-bad .reveal-kicker { color: var(--fortuna-tag-bad); }
+
+@keyframes fortuna-reveal-pop {
+  from { transform: scale(.6); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.entries-banner {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 26px;
+  border-radius: 999px;
+  background: var(--fortuna-banner-bg);
+  color: var(--fortuna-banner-ink);
+  font: 600 20px "Segoe UI", system-ui, sans-serif;
+  border: 2px solid var(--fortuna-banner-accent);
+  z-index: 15;
+}
+/* display:flex above beats the UA's [hidden] rule — restore it explicitly. */
+.entries-banner[hidden], .reveal[hidden] { display: none; }
+
+.entries-cmd {
+  color: var(--fortuna-banner-accent);
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+
+/* panel-core toggles body.offline when Streamer.bot is unreachable. */
+body.offline .stage { opacity: .35; filter: grayscale(.8); }

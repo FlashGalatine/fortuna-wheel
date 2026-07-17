@@ -1,0 +1,11 @@
+{
+  "entries": [
+    { "id": "e_demo1", "label": "Win a round with no jumping", "tag": "bad", "source": "streamer" },
+    { "id": "e_demo2", "label": "Viewer picks your character", "tag": "neutral", "source": "streamer" },
+    { "id": "e_demo3", "label": "Free choice — play anything", "tag": "good", "source": "streamer" }
+  ],
+  "entryMode": { "open": false, "maxEntries": 25, "windowSec": 0, "openedAt": null },
+  "settings": { "removeOnDraw": false, "defaultChatTag": "good" },
+  "lastSpin": null,
+  "revision": 0
+}

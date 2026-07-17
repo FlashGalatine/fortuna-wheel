@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fortuna — wheel control</title>
+<!--
+  Browser control page — open http://127.0.0.1:7474/fortuna-shared/control.html
+  in any browser (or dock it in OBS: Docks → Custom Browser Docks). Everything
+  goes through the "Fortuna Command" Streamer.bot action; the sidecar answers
+  with fortuna:status snapshots, and the entry list mirrors fortuna:update.
+  ?sbport=<n> overrides the Streamer.bot WebSocket port.
+-->
+<style>
+  :root { --bg:#14171c; --panel:#1c2129; --ink:#e8ecf1; --muted:#8b94a3; --acc:#ffd166; --bad:#ff4d5e; --ok:#3ddc84; --edge:#2a3342; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:18px; background:var(--bg); color:var(--ink); font:14px/1.5 'Segoe UI', system-ui, sans-serif; max-width:640px; }
+  h1 { font-size:17px; margin:0 0 4px; letter-spacing:.04em; }
+  h1 .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--bad); margin-right:8px; vertical-align:1px; }
+  body:not(.offline) h1 .dot { background: var(--ok); }
+  .sub { color:var(--muted); font-size:12px; margin-bottom:14px; }
+  .warn { display:none; color:#ffd7dd; background:#241318; border:1px solid var(--bad);
+    border-radius:8px; padding:9px 12px; font-size:12.5px; line-height:1.45; margin:0 0 12px; }
+  body.no-sidecar .warn { display:block; }
+  .warn b { color:#fff; }
+  .warn code { background:#3a1a20; padding:.05em .4em; border-radius:4px; color:#ffd7dd; }
+  fieldset { border:1px solid var(--edge); border-radius:8px; background:var(--panel); margin:0 0 12px; padding:12px 14px; }
+  legend { padding:0 6px; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.1em; }
+  label { display:block; color:var(--muted); font-size:12px; margin:8px 0 3px; }
+  input[type=text], input[type=number], select { padding:7px 9px; border:1px solid var(--edge); border-radius:6px; background:#10141a; color:var(--ink); font:inherit; }
+  input[type=text] { width:100%; }
+  .chk { display:flex; align-items:center; gap:7px; margin:0; color:var(--ink); font-size:13px; cursor:pointer; }
+  .chk input { accent-color: var(--acc); width:15px; height:15px; }
+  .hint { color:var(--muted); font-size:11.5px; margin-top:6px; }
+  .row { display:flex; gap:8px; align-items:flex-end; }
+  .row > div { flex:1 1 auto; }
+  button { padding:7px 14px; border:1px solid var(--edge); border-radius:6px; background:#232a35; color:var(--ink); font:inherit; font-weight:600; cursor:pointer; }
+  button:hover { border-color: var(--acc); }
+  button:disabled { opacity:.45; cursor:default; }
+  button.primary { background:var(--acc); color:#14171c; border-color:var(--acc); }
+  button.danger { border-color: var(--bad); color: var(--bad); background:transparent; }
+  .btns { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .status { font-size:12.5px; }
+  .status b { color: var(--acc); }
+  .status .err { color: var(--bad); }
+  .status .dim { color: var(--muted); }
+
+  /* Entry list */
+  .entries { background:#10141a; border:1px solid var(--edge); border-radius:6px; margin-top:8px; max-height:300px; overflow:auto; }
+  .entry { display:flex; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px dashed #222a35; }
+  .entry:last-child { border-bottom:none; }
+  .entry .lbl { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .entry .src { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  .entry select { padding:3px 5px; font-size:12px; }
+  .entry .tag-good { color: var(--ok); }
+  .entry .tag-bad { color: var(--bad); }
+  .entry .tag-neutral { color: var(--muted); }
+  .entry button { padding:2px 9px; font-size:12px; }
+  .empty { padding:10px; color:var(--muted); }
+
+  /* Spin panel */
+  #btn-spin { font-size:17px; padding:12px 34px; letter-spacing:.06em; }
+  body.ready #btn-spin { animation: fortuna-pulse 1s ease-in-out infinite; }
+  @keyframes fortuna-pulse { 50% { box-shadow: 0 0 18px var(--acc); } }
+  .ready-banner { display:none; color:#14171c; background:var(--ok); border-radius:6px;
+    padding:6px 12px; font-weight:700; margin-bottom:8px; }
+  body.ready .ready-banner { display:inline-block; }
+  .drawn { margin-top:10px; font-size:13px; }
+  .drawn b { color:var(--acc); }
+</style>
+</head>
+<body>
+<h1><span class="dot"></span>Fortuna — Wheel of Fate</h1>
+<div class="sub">Fortuna Command → sidecar · needs the sidecar running (<code>npm run sidecar</code>)</div>
+<div id="sidecar-note" class="warn">
+  ⚠ <b>The Fortuna sidecar isn't responding.</b> Streamer.bot is connected, but every button on this
+  page does nothing until the sidecar is running. Launch <code>start-fortuna.bat</code> (or run
+  <code>npm run sidecar</code> in the Fortuna folder), or add the <code>Fortuna Sidecar Start</code>
+  action in Streamer.bot.
+</div>
+
+<fieldset>
+  <legend>Spin</legend>
+  <span class="ready-banner">✔ Drawing ready — spin when you are</span>
+  <div class="btns" style="align-items:center">
+    <button class="primary" id="btn-spin">🎡 SPIN</button>
+    <label class="chk"><input type="checkbox" id="remove-after"> Remove the drawn entry afterwards</label>
+  </div>
+  <div class="drawn" id="drawn" hidden>Last draw: <b id="drawn-label"></b> <button id="btn-remove-drawn">Remove it from the wheel</button></div>
+</fieldset>
+
+<fieldset>
+  <legend>Wheel entries</legend>
+  <div class="row">
+    <div><label for="new-label">Add a name / objective / stipulation</label>
+      <input type="text" id="new-label" maxlength="80" placeholder="Winner picks the next game"></div>
+    <div style="flex:0 0 110px"><label for="new-tag">Tag</label>
+      <select id="new-tag" style="width:100%">
+        <option value="neutral">neutral</option>
+        <option value="good">good 🎉</option>
+        <option value="bad">bad 🌧</option>
+      </select></div>
+    <button class="primary" id="btn-add">Add</button>
+  </div>
+  <div class="entries" id="entries"><div class="empty">no entries yet</div></div>
+  <div class="btns">
+    <button class="danger" id="btn-clear-chat">Clear viewer entries</button>
+    <button class="danger" id="btn-clear-all">Clear ALL</button>
+  </div>
+  <div class="hint">good = confetti on draw · bad = rain · neutral = a subtle glow. Tag changes apply instantly.</div>
+</fieldset>
+
+<fieldset>
+  <legend>Viewer drawing (!entry)</legend>
+  <div class="row">
+    <div><label for="max-entries">Max entries</label>
+      <input type="number" id="max-entries" min="1" max="200" value="25" style="width:100%"></div>
+    <div><label for="window-sec">Time window (seconds, 0 = none)</label>
+      <input type="number" id="window-sec" min="0" max="3600" value="0" style="width:100%"></div>
+    <button class="primary" id="btn-open">Open entries</button>
+    <button class="danger" id="btn-close">Close</button>
+  </div>
+  <div class="hint" id="entry-hint">Viewers type <b>!entry</b> in chat to get on the wheel (one entry each). The wheel
+    closes itself at the max or when the window runs out, then lights the Spin button.</div>
+</fieldset>
+
+<fieldset>
+  <legend>Settings</legend>
+  <div class="row" style="align-items:center">
+    <label class="chk"><input type="checkbox" id="remove-on-draw"> Always remove drawn entries</label>
+    <div style="flex:0 0 180px"><label for="chat-tag">Viewer entries count as</label>
+      <select id="chat-tag" style="width:100%">
+        <option value="good">good 🎉</option>
+        <option value="neutral">neutral</option>
+        <option value="bad">bad 🌧</option>
+      </select></div>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Status</legend>
+  <div class="status" id="status"><span class="dim">waiting for sidecar…</span></div>
+</fieldset>
+
+<script src="panel-core.js"></script>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => { const d = document.createElement('div'); d.textContent = String(s ?? ''); return d.innerHTML; };
+
+  // Sidecar liveness: every command should draw a fortuna:status reply from the
+  // sidecar. If none arrives within the window, the sidecar is down — the
+  // commands are being broadcast into the void. Show a banner instead of
+  // silently swallowing the click.
+  let lastStatusAt = 0;
+  let heartbeatTimer = null;
+  const HEARTBEAT_MS = 3000;
+  function armHeartbeat() {
+    if (heartbeatTimer) clearTimeout(heartbeatTimer);
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = null;
+      if (Date.now() - lastStatusAt > HEARTBEAT_MS - 250) document.body.classList.add('no-sidecar');
+    }, HEARTBEAT_MS);
+  }
+  function noteSidecarAlive() {
+    lastStatusAt = Date.now();
+    document.body.classList.remove('no-sidecar');
+    if (heartbeatTimer) { clearTimeout(heartbeatTimer); heartbeatTimer = null; }
+  }
+
+  const send = (command, value) => {
+    if (!window.__FORTUNA_SEND_COMMAND || !window.__FORTUNA_SEND_COMMAND(command, value)) {
+      $('status').innerHTML = '<span class="err">Not connected to Streamer.bot — is its WebSocket Server running (auth off)?</span>';
+      return;
+    }
+    armHeartbeat(); // expect a status reply from the sidecar; warn if it never comes
+  };
+
+  // One command per click — NOT several. Firing multiple DoActions to the same
+  // Streamer.bot action in a burst makes SB bleed their arguments together
+  // (verified on SB 1.0.4). Batched values ride as JSON; the sidecar unpacks them.
+
+  // ── Spin ────────────────────────────────────────────────────────────────────
+  $('btn-spin').onclick = () => {
+    send('spin', JSON.stringify({ removeAfter: $('remove-after').checked }));
+  };
+  $('btn-remove-drawn').onclick = () => send('removeDrawn');
+
+  // ── Entries ─────────────────────────────────────────────────────────────────
+  const addEntry = () => {
+    const label = $('new-label').value.trim();
+    if (!label) return;
+    send('addEntry', JSON.stringify({ label, tag: $('new-tag').value }));
+    $('new-label').value = '';
+    $('new-label').focus();
+  };
+  $('btn-add').onclick = addEntry;
+  $('new-label').addEventListener('keydown', (e) => { if (e.key === 'Enter') addEntry(); });
+  $('btn-clear-chat').onclick = () => send('clearEntries', 'chat');
+  $('btn-clear-all').onclick = () => { if (confirm('Clear every entry on the wheel?')) send('clearEntries', 'all'); };
+
+  function renderEntries(entries) {
+    const box = $('entries');
+    if (!entries.length) { box.innerHTML = '<div class="empty">no entries yet</div>'; return; }
+    box.innerHTML = entries.map((e) => `
+      <div class="entry" data-id="${esc(e.id)}">
+        <span class="lbl" title="${esc(e.label)}">${esc(e.label)}</span>
+        <span class="src">${e.source === 'chat' ? 'viewer' : ''}</span>
+        <select class="tag-select tag-${esc(e.tag)}">
+          ${['good', 'bad', 'neutral'].map((t) => `<option value="${t}"${t === e.tag ? ' selected' : ''}>${t}</option>`).join('')}
+        </select>
+        <button class="rm">✕</button>
+      </div>`).join('');
+    for (const row of box.querySelectorAll('.entry')) {
+      const id = row.dataset.id;
+      row.querySelector('.rm').onclick = () => send('removeEntry', id);
+      row.querySelector('.tag-select').onchange = (e) => send('setTag', JSON.stringify({ id, tag: e.target.value }));
+    }
+  }
+
+  // ── Viewer drawing ──────────────────────────────────────────────────────────
+  $('btn-open').onclick = () => send('openEntries', JSON.stringify({
+    maxEntries: Number($('max-entries').value) || 25,
+    windowSec: Number($('window-sec').value) || 0,
+  }));
+  $('btn-close').onclick = () => send('closeEntries');
+
+  // ── Settings — one batched command per change ───────────────────────────────
+  const sendSettings = () => send('setSettings', JSON.stringify({
+    removeOnDraw: $('remove-on-draw').checked,
+    defaultChatTag: $('chat-tag').value,
+  }));
+  $('remove-on-draw').onchange = sendSettings;
+  $('chat-tag').onchange = sendSettings;
+
+  // Fields the operator is typing in shouldn't be clobbered by status echoes.
+  const dirty = new Set();
+  for (const id of ['new-label', 'max-entries', 'window-sec']) {
+    $(id).addEventListener('focus', () => dirty.add(id));
+    $(id).addEventListener('blur', () => dirty.delete(id));
+  }
+  const setIfClean = (id, v) => { if (!dirty.has(id)) $(id).value = v; };
+
+  // fortuna:status rides the command relay as command "__status" (docs/PROTOCOL.md).
+  window.addEventListener('fortuna:command', (e) => {
+    const d = e.detail || {};
+    if (d.command !== '__status') return;
+    noteSidecarAlive();
+    let s; try { s = JSON.parse(d.value); } catch { return; }
+    document.body.classList.toggle('ready', !!s.ready);
+    $('btn-spin').disabled = !!s.spinning || !s.entryCount;
+    if (s.entryMode) {
+      setIfClean('max-entries', s.entryMode.maxEntries ?? 25);
+      setIfClean('window-sec', s.entryMode.windowSec ?? 0);
+    }
+    if (s.settings) {
+      $('remove-on-draw').checked = !!s.settings.removeOnDraw;
+      $('chat-tag').value = s.settings.defaultChatTag || 'good';
+    }
+    if (s.lastSpin) {
+      $('drawn').hidden = false;
+      $('drawn-label').textContent = s.lastSpin.label;
+    } else {
+      $('drawn').hidden = true;
+    }
+    $('status').innerHTML =
+      `Entries: <b>${s.entryCount ?? 0}</b> (${s.chatEntryCount ?? 0} viewers)` +
+      ` · Drawing: <b>${s.entryMode?.open ? 'OPEN' : 'closed'}</b>` +
+      (s.entryMode?.open && s.entryMode.secondsLeft != null ? ` · <b>${s.entryMode.secondsLeft}s</b> left` : '') +
+      ` · Spinning: <b>${s.spinning ? 'YES' : 'no'}</b>` +
+      (s.lastError ? `<br><span class="err">${esc(s.lastError)}</span>` : '');
+  });
+
+  // The entry list mirrors the persisted wheel payload.
+  window.addEventListener('fortuna:update', (e) => {
+    const p = e.detail || {};
+    renderEntries(Array.isArray(p.entries) ? p.entries : []);
+  });
+
+  // Ask the sidecar for a status snapshot once connected (small delay so the
+  // panel-core connect + subscribe settles first), then re-probe periodically so
+  // the liveness banner stays honest if the sidecar dies while the page is open.
+  setTimeout(() => send('status'), 800);
+  setInterval(() => send('status'), 10000);
+})();
+</script>
+</body>
+</html>
