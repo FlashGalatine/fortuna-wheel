@@ -9,7 +9,7 @@ each payload as a same-named window `CustomEvent` (detail = the payload object).
 | Action (exact name) | Role |
 |---|---|
 | `Fortuna Push` | Called by the sidecar with a `fortunaPayload` arg → persists it to the SB global `fortuna.payload` and broadcasts it. Called by panel-core with **no** arg on connect → re-broadcasts the persisted payload (the sync-on-connect replay SB doesn't have natively). |
-| `Fortuna Command` | Relay: DoAction args `{command, value}` (or a chat trigger's `rawInput`, first word = command) → re-broadcasts `{type:"fortuna:command", command, value, user?, userId?}`. WS clients can't broadcast to each other, so every control surface rides this. Chat triggers' `user`/`userId` args are relayed automatically. |
+| `Fortuna Command` | Relay: DoAction args `{command, value}` → re-broadcasts `{type:"fortuna:command", command, value, user?, userId?}`. WS clients can't broadcast to each other, so every control surface rides this. Chat Command triggers attach directly: SB sets its own `command` (`!entry`) + `commandId`, which the action detects and maps — `!entry` → `entry`, `!wheel <cmd> [value…]` → first word of `rawInput` = command, rest = value. `user`/`userId` are relayed automatically. |
 
 ## `fortuna:update` — the persisted wheel state
 

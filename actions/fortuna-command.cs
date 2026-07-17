@@ -7,11 +7,12 @@
 // Call styles:
 //   • control.html — DoAction args { command:"spin", value:"{\"removeAfter\":true}" }
 //   • Stream Deck  — Set Argument sub-actions before this one, same two args
-//   • Chat "!entry" trigger — NO command arg; add a Set Argument sub-action
-//     command = entry BEFORE this sub-action. The trigger's own user/userId args
-//     are relayed automatically so the sidecar can dedupe one entry per viewer.
-//   • Chat "!wheel <cmd> [value...]" trigger — the trigger's rawInput arg: the
-//     first word becomes command, the rest value (e.g. "!wheel open").
+//   • Chat Command triggers — attach them directly, NO Set Argument needed.
+//     SB command triggers set their own `command` (the matched chat command,
+//     e.g. "!entry") + `commandId`; this action detects that and maps:
+//       "!entry"                → command "entry" (user/userId relayed for dedupe)
+//       "!wheel <cmd> [value…]" → first word of rawInput = command, rest = value
+//     Any other chat command "!foo" relays as command "foo" with rawInput as value.
 //
 // Commands the sidecar understands (docs/PROTOCOL.md): addEntry, removeEntry,
 // setTag, clearEntries, setEntries, openEntries, closeEntries, entry, spin,
@@ -33,16 +34,42 @@ public class CPHInline
             string command = "";
             string value = "";
 
-            string c, v, raw;
-            if (CPH.TryGetArg("command", out c) && !string.IsNullOrWhiteSpace(c))
+            string c, v, raw, cid;
+            CPH.TryGetArg("rawInput", out raw);
+            raw = raw == null ? "" : raw.Trim();
+
+            // A chat Command trigger sets ITS OWN `command` argument (the matched
+            // chat command, e.g. "!entry") plus a `commandId` — which a control-page
+            // DoAction never carries. Without this branch the trigger's command
+            // shadows ours and the sidecar sees unknown "!entry"/"!wheel".
+            if (CPH.TryGetArg("commandId", out cid) && !string.IsNullOrWhiteSpace(cid))
             {
+                CPH.TryGetArg("command", out c);
+                string chatCmd = (c ?? "").Trim().TrimStart('!').ToLowerInvariant();
+                if (chatCmd == "wheel")
+                {
+                    // "!wheel addEntry No jumping | bad" → command=addEntry, value=the rest
+                    int sp = raw.IndexOf(' ');
+                    command = sp < 0 ? raw : raw.Substring(0, sp);
+                    value = sp < 0 ? "" : raw.Substring(sp + 1).Trim();
+                }
+                else
+                {
+                    // "!entry" (or any future "!spin"-style trigger): the chat command
+                    // IS the sidecar command; anything typed after it rides as value.
+                    command = chatCmd;
+                    value = raw;
+                }
+            }
+            else if (CPH.TryGetArg("command", out c) && !string.IsNullOrWhiteSpace(c))
+            {
+                // Control page / Stream Deck: explicit { command, value } args.
                 command = c.Trim();
                 if (CPH.TryGetArg("value", out v) && v != null) value = v;
             }
-            else if (CPH.TryGetArg("rawInput", out raw) && !string.IsNullOrWhiteSpace(raw))
+            else if (raw.Length > 0)
             {
-                // Chat style: "!wheel addEntry No jumping | bad" → rawInput = "addEntry No jumping | bad"
-                raw = raw.Trim();
+                // Bare rawInput fallback (manual Set Argument setups).
                 int sp = raw.IndexOf(' ');
                 command = sp < 0 ? raw : raw.Substring(0, sp);
                 value = sp < 0 ? "" : raw.Substring(sp + 1).Trim();

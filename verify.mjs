@@ -293,8 +293,10 @@ async function testSidecar() {
   const sOpen = await client.next((d) => isStatus(d) && parseStatus(d).entryMode.open).then(parseStatus);
   check('sidecar: openEntries', sOpen.entryMode.open && sOpen.entryMode.maxEntries === 2, JSON.stringify(sOpen.entryMode));
 
-  // Chat !entry with user args (relayed by the command action).
-  cmd('entry', '', { user: 'chatter_99', userId: 'u99' });
+  // Chat !entry exactly as a real SB Command trigger fires it: SB's OWN
+  // command arg ("!entry") + commandId + rawInput — the action must map it to
+  // the sidecar's "entry" command instead of relaying "!entry" verbatim.
+  cmd('!entry', '', { commandId: 'trig-1', rawInput: '', user: 'chatter_99', userId: 'u99' });
   const u7 = await client.next((d) => isUpdate(d) && d.entries.some((e) => e.user === 'chatter_99'));
   const chatE = u7.entries.find((e) => e.user === 'chatter_99');
   check('sidecar: chat entry lands with default tag', chatE.source === 'chat' && chatE.tag === 'good', JSON.stringify(chatE));
@@ -302,6 +304,7 @@ async function testSidecar() {
   // Duplicate userId ignored.
   const atDupe = mark();
   cmd('entry', '', { user: 'CHATTER_99_renamed', userId: 'u99' });
+  cmd('!entry', '', { commandId: 'trig-1', rawInput: '', user: 'CHATTER_99_renamed', userId: 'u99' });
   cmd('status');
   const sDupe = await since(atDupe, isStatus).then((d) => parseStatus(d));
   check('sidecar: duplicate userId deduped', sDupe.chatEntryCount === 1, String(sDupe.chatEntryCount));
@@ -381,6 +384,17 @@ async function testSidecar() {
   const uNoChat = await since(atClear, (d) => isUpdate(d) && !d.entries.some((e) => e.source === 'chat'));
   check('sidecar: clearEntries chat keeps streamer entries', uNoChat && uNoChat.entries.length > 0 && uNoChat.entries.every((e) => e.source === 'streamer'),
     JSON.stringify(uNoChat?.entries.map((e) => e.source)));
+
+  // Chat "!wheel addEntry …" as a real Command trigger fires it (command arg is
+  // "!wheel", the sidecar command lives in rawInput).
+  const atWheelChat = mark();
+  cmd('!wheel', '', { commandId: 'trig-2', rawInput: 'addEntry Run it back | bad', user: 'modfriend', userId: 'u5' });
+  const uWheelChat = await since(atWheelChat, (d) => isUpdate(d) && d.entries.some((e) => e.label === 'Run it back'));
+  check('sidecar: chat !wheel addEntry maps through the trigger shape',
+    uWheelChat && uWheelChat.entries.find((e) => e.label === 'Run it back').tag === 'bad',
+    JSON.stringify(uWheelChat?.entries.map((e) => e.label)));
+  cmd('removeEntry', 'Run it back');
+  await since(mark() - 1, (d) => isUpdate(d) && !d.entries.some((e) => e.label === 'Run it back'));
 
   // setSettings batch.
   cmd('setSettings', JSON.stringify({ removeOnDraw: true, defaultChatTag: 'neutral' }));

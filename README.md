@@ -60,11 +60,14 @@ sidecar automatically.
 
 ### 3. Chat triggers (optional, for viewer drawings)
 
-- Add a **Command** trigger `!entry` to the `Fortuna Command` action, with a
-  **Set Argument** sub-action *before* the C# one: `command` = `entry`.
-  The trigger's `user`/`userId` are relayed automatically (one entry per viewer).
-- Optionally add `!wheel` passing `rawInput` for mod controls
-  (`!wheel openEntries`, `!wheel closeEntries`, `!wheel addEntry Run it back | bad`).
+Add **Command** triggers straight onto the `Fortuna Command` action — no
+Set Argument sub-actions needed (the action detects chat triggers itself):
+
+- `!entry` — viewers join an open drawing; `user`/`userId` are relayed
+  automatically (one entry per viewer).
+- `!wheel <cmd> [value…]` — mod controls: `!wheel openEntries`,
+  `!wheel closeEntries`, `!wheel addEntry Run it back | bad`, `!wheel spin`.
+  Consider restricting this trigger's permissions to moderators in SB.
 
 ### 4. Run the sidecar
 
