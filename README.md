@@ -34,6 +34,15 @@ CSS variables or replace the whole presentation (Magic 8-ball, crystal ball…)
 
 Requirements: [Streamer.bot](https://streamer.bot) 1.0.4+, Node ≥ 18, OBS.
 
+First, get the code onto the machine that runs Streamer.bot — either
+
+```
+git clone https://github.com/FlashGalatine/fortuna-wheel.git
+```
+
+or click **<> Code → Download ZIP** on the repo page and extract it. The
+`<repo>` paths below refer to that folder.
+
 ### 1. Streamer.bot servers
 
 - **WebSocket Server** (Servers/Clients → WebSocket Server): Start it on
