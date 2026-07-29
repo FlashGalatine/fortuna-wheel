@@ -1,6 +1,6 @@
 {
   "name": "fortuna-wheel",
-  "version": "0.1.0",
+  "version": "1.0.6",
   "description": "Fortuna — a Wheel of Fate randomizer browser-source overlay, driven by Streamer.bot",
   "type": "module",
   "license": "MIT",
