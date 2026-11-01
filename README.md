@@ -5,7 +5,8 @@ Chromium ≥ 80 streaming app): load it with names, objectives, or
 stipulations, hit **SPIN**, and the wheel decelerates onto a result. Entries
 carry a *good / bad / neutral* tag — a good draw pops confetti, a bad draw
 pours rain, neutral gets a subtle glow (all re-skinnable). Viewers can enter
-drawings from chat with `!entry`. Theme designers can restyle the wheel with
+drawings from chat with `!entry` or spin the wheel with channel points. Theme
+designers can restyle the wheel with
 CSS variables or replace the whole presentation (Magic 8-ball, crystal ball…)
 — see [docs/THEMING.md](docs/THEMING.md).
 
@@ -68,16 +69,36 @@ Optional: `Fortuna Sidecar Start`
 System.dll reference — instructions in the file header) so SB launches the
 sidecar automatically.
 
-### 3. Chat triggers (optional, for viewer drawings)
+### 3. Chat and channel point triggers (optional)
 
-Add **Command** triggers straight onto the `Fortuna Command` action — no
-Set Argument sub-actions needed (the action detects chat triggers itself):
+Add these triggers straight onto the `Fortuna Command` action — no Set Argument
+sub-actions needed (the action detects them itself):
 
-- `!entry` — viewers join an open drawing; `user`/`userId` are relayed
-  automatically (one entry per viewer).
-- `!wheel <cmd> [value…]` — mod controls: `!wheel openEntries`,
+- **Command** `!entry` — viewers join an open drawing; `user`/`userId` are
+  relayed automatically (one entry per viewer).
+- **Command** `!wheel <cmd> [value…]` — mod controls: `!wheel openEntries`,
   `!wheel closeEntries`, `!wheel addEntry Run it back | bad`, `!wheel spin`.
   Consider restricting this trigger's permissions to moderators in SB.
+- **Twitch → Channel Reward → Reward Redemption** — pick your reward; every
+  redeem spins the wheel. Anything the viewer types is ignored.
+
+The redeem trigger needs the current `fortuna-command.cs`. If you set Fortuna up
+before it was added, paste the file into the action again and click Compile.
+
+**Set a cooldown of at least 10 seconds on a spin reward** (in its Twitch
+settings). A spin takes up to about 8 seconds, and a redeem is refused while the
+wheel is spinning or empty, but the viewer still loses the points. A redeem also
+closes an open viewer drawing, because nobody can join mid-spin.
+
+**A reward that should do something else, or a Stream Deck button,** gets its own
+action: *Set Argument* `command` (and `value` if needed), then *Run Action*
+`Fortuna Command`. For example, `command` = `entry` lets viewers buy their way
+into an open drawing. A redeem while entries are closed does nothing, and still
+costs the points.
+
+> **Never add a *Set Argument* for `command` inside `Fortuna Command` itself.**
+> Fortuna's own status messages run through that action, so a fixed `command`
+> rewrites all of them. With `spin`, the wheel spins on its own and never stops.
 
 ### 4. Run the sidecar
 
@@ -106,11 +127,11 @@ launches harmless.
 
 - `npm start` — mock Streamer.bot (HTTP :7474 + WS :8080) with a landing page;
   `/mock/fixture` broadcasts a sample wheel, POST `/mock/push` any payload.
-- `npm run verify` — 49 offline checks: spin math determinism, the real
+- `npm run verify` — 53 offline checks: spin math determinism, the real
   panel-core against the mock (subscribe case, sync replay, serialized queue),
   HTTP maps, and a real sidecar E2E (entry CRUD, `!entry` dedupe/limits, spin
-  lifecycle, restart persistence). Uses off-default ports (7478/8084/7494) so
-  it runs beside a live SB.
+  lifecycle, channel point redeems, restart persistence). Uses off-default ports
+  (7478/8084/7494) so it runs beside a live SB.
 - `npm run verify:render` — real-pixel checks in a system Edge/Chrome
   (`npm i --no-save playwright-core` first): painted wheel, revealed draw with
   confetti on the fx layer, control page. Writes gitignored PNGs.
