@@ -115,7 +115,7 @@ function adoptConfig(parsed) {
 
 function normalizeEntry(e) {
   if (!e || typeof e !== 'object') return null;
-  const label = String(e.label ?? '').trim().slice(0, LABEL_MAX_CHARS);
+  const label = (textOf(e.label) ?? '').trim().slice(0, LABEL_MAX_CHARS);
   if (!label) return null;
   const out = {
     id: typeof e.id === 'string' && e.id ? e.id : newId('e'),
@@ -123,8 +123,10 @@ function normalizeEntry(e) {
     tag: TAGS.includes(e.tag) ? e.tag : 'neutral',
     source: e.source === 'chat' ? 'chat' : 'streamer',
   };
-  if (e.user != null) out.user = String(e.user).slice(0, 60);
-  if (e.userId != null) out.userId = String(e.userId).slice(0, 60);
+  const user = textOf(e.user);
+  const userId = textOf(e.userId);
+  if (user != null) out.user = user.slice(0, 60);
+  if (userId != null) out.userId = userId.slice(0, 60);
   return out;
 }
 
@@ -140,7 +142,15 @@ async function persist() {
   catch (err) { log(`Could not persist config: ${err.message}`); }
 }
 
+// Chat can send any JSON through "!wheel <command> <JSON>", and String() and Number()
+// throw on an object like {"toString":1} or an array holding one. So only a primitive
+// converts, and anything else reads as absent.
+function textOf(v) {
+  return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' ? String(v) : null;
+}
+
 function clampInt(v, min, max, fallback) {
+  if (v && typeof v === 'object') return fallback; // Number() can throw: see textOf
   const n = Math.round(Number(v));
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, n));
@@ -234,7 +244,7 @@ function addEntry({ label, tag, source, user, userId }) {
 }
 
 function findEntry(idOrLabel) {
-  const key = String(idOrLabel ?? '').trim();
+  const key = (textOf(idOrLabel) ?? '').trim();
   if (!key) return null;
   return config.entries.find((e) => e.id === key)
     || config.entries.find((e) => e.label.toLowerCase() === key.toLowerCase())
@@ -395,7 +405,10 @@ function dispatch(command, value, user, userId) {
     case 'setEntries': {
       const arr = parseJson(value);
       if (!Array.isArray(arr)) { fail('setEntries: expected a JSON array'); return; }
-      config.entries = arr.map(normalizeEntry).filter(Boolean).slice(0, MAX_ENTRIES);
+      const entries = arr.map(normalizeEntry).filter(Boolean).slice(0, MAX_ENTRIES);
+      // [] clears the wheel on purpose. A list with nothing usable in it must not.
+      if (arr.length && !entries.length) { fail('setEntries: no usable entries'); return; }
+      config.entries = entries;
       applyChange();
       return;
     }
@@ -454,7 +467,18 @@ function connectSb() {
       // Echo-loop guard: this client also hears its own fortuna:update /
       // fortuna:status broadcasts. Consume ONLY the command channel.
       if (!d || typeof d !== 'object' || d.type !== 'fortuna:command') return;
-      dispatch(String(d.command ?? ''), String(d.value ?? ''), d.user == null ? '' : String(d.user), d.userId == null ? '' : String(d.userId));
+      // The backstop: a command that throws is logged and dropped, so one message can't
+      // take the wheel off stream, though it may leave that command half applied. The
+      // String() calls belong inside it. The action only relays strings, so a field that
+      // throws here marks a bad relay, and running it with that field blank could do harm:
+      // clearEntries reads a blank value as "all".
+      try {
+        dispatch(String(d.command ?? ''), String(d.value ?? ''), d.user == null ? '' : String(d.user), d.userId == null ? '' : String(d.userId));
+      } catch (err) {
+        lastError = 'a command failed: see the sidecar log';
+        log(`${lastError}\n${err.stack || err}`);
+        try { pushStatus(); } catch { /* the log line is the record */ }
+      }
     });
   } catch {
     scheduleSbReconnect();

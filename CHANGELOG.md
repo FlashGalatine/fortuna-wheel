@@ -25,7 +25,7 @@ reward does nothing or runs the viewer's text as a command.
 - **`verify` runs the real C# action.** It compiles `fortuna-command.cs` with the
   .NET Framework's `csc` against a stub `CPH` (`tools/action-harness.cs`) and
   reports those checks as skipped when `csc` is missing. The same rows also run
-  through the mock's copy of the mapping, so drift on any row fails — 125/125. This
+  through the mock's copy of the mapping, so drift on any row fails — 143/143. This
   proves the action's logic, not real Streamer.bot behavior.
 
 ### Changed
@@ -62,18 +62,30 @@ reward does nothing or runs the viewer's text as a command.
   that sets its own `command` still runs.
 - **A command on cooldown still ran.** A Command Cooldown trigger also sets
   `commandId`, so it was treated as the command itself. It is now ignored.
+- **One chat message could crash the sidecar.** On an unrestricted `!wheel`,
+  `!wheel addEntry {"label":{"toString":1}}` ended the process, because `String()` and
+  `Number()` throw on that object, and the wheel stayed down until restarted.
+  `setEntries`, `setTag` and `openEntries` could do the same. Now only text, numbers
+  and booleans convert. An object or array `label` counts as empty, so `{}` no longer
+  makes an entry named `[object Object]`. A bad `user` or `userId` is dropped, and a
+  bad `maxEntries` or `windowSec` keeps its old value. A `setEntries` list with nothing
+  usable in it is refused instead of emptying the wheel, including a list of blank
+  labels; `[]` still clears. Anything that still throws is logged and dropped, with a
+  note on the control page, though it may leave that command half applied. Viewers can
+  still run any valid command on an unrestricted `!wheel`, so keep it restricted to
+  moderators.
 
 ### Documentation
 
 - README: channel point setup, and the `verify` check count brought up to date.
 
-Verified offline: `verify` 125/125. Verified live on Streamer.bot 1.0.7, on pastes
+Verified offline: `verify` 143/143. Verified live on Streamer.bot 1.0.7, on pastes
 of the action from before the Command Cooldown check: it compiles; simulated redeem,
 chat and control page shapes behave as designed over DoAction; a real chat trigger
 relays correctly and its `__source` reads as the event type's name; and a real Set
 Argument `command` = `spin` left the wheel idle with no loop. Not yet verified live:
-the Command Cooldown check, a real channel point redeem, approval or rejection, and
-the `__source` values they carry.
+the Command Cooldown check, a real channel point redeem, approval or rejection, the
+`__source` values they carry, and the sidecar crash fix.
 
 ## [1.0.6] — 2026-07-29
 

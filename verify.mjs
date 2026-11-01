@@ -8,7 +8,7 @@
 //   4. Sidecar E2E: the REAL fortuna-sidecar.mjs runs against the mock —
 //      entry CRUD, chat !entry dedupe + limits + auto-close, spin lifecycle
 //      (spinning → revealed), channel point redeems, removeOnDraw / removeDrawn,
-//      restart persistence.
+//      hostile chat JSON, restart persistence.
 //   5. The REAL actions/fortuna-command.cs, compiled with the .NET Framework's csc
 //      against a stub CPH (tools/action-harness.cs). Proves its logic and C# 5
 //      syntax, not real Streamer.bot behavior. Skipped when csc isn't installed.
@@ -491,6 +491,104 @@ async function testSidecar() {
   cmd('status');
   const sAlive = await since(atUnknown, isStatus);
   check('sidecar: unknown command ignored', !!sAlive);
+
+  // ── Hostile JSON from chat ──
+  // Anyone allowed to run !wheel can send any JSON, and String() and Number() throw on
+  // {"toString":1} or an array holding one. That used to end the process, and the wheel
+  // stayed down until someone restarted it. After each input, a removeEntry that can't
+  // match sets a unique lastError: its status proves the sidecar outlived the input, and
+  // what came before it is the input's own outcome. A row that kills the sidecar restarts
+  // it, so every other row still reports for itself.
+  let probes = 0;
+  const hostile = async (send) => {
+    const at = mark();
+    await send();
+    const probe = `__probe_${++probes}`;
+    cmd('removeEntry', probe);
+    const proof = await since(at, (d) => isStatus(d) && parseStatus(d).lastError.includes(probe), 1500);
+    if (proof && sidecarProc.exitCode === null) {
+      const outcome = client.events.slice(at, client.events.indexOf(proof, at));
+      return {
+        alive: true,
+        after: parseStatus(proof),
+        lastError: outcome.filter(isStatus).map(parseStatus).pop()?.lastError,
+        updates: outcome.filter(isUpdate),
+      };
+    }
+    if (sidecarProc.exitCode !== null) {
+      const atRespawn = mark();
+      sidecarProc = spawnSidecar(cfgPath);
+      await since(atRespawn, isStatus, 5000);
+    }
+    return { alive: false, updates: [] };
+  };
+  const BAD = '{"toString":1}';
+  const viewerSays = (rawInput) => () => cmd('!wheel', '', { commandId: 'trig-3', rawInput, user: 'viewer', userId: 'u666' });
+  const wheelBefore = client.events.filter(isUpdate).pop().entries;
+  const wheelJson = JSON.stringify(wheelBefore);
+  const modeBefore = parseStatus(sAlive).entryMode;
+  const refused = (r, lastError) => r.alive && r.lastError === lastError && r.updates.length === 0 && r.after.entryCount === wheelBefore.length;
+
+  const SET_TAG_ERROR = 'setTag: expected {id, tag} with tag good|bad|neutral';
+  for (const [input, lastError] of [
+    [`addEntry {"label":${BAD}}`, 'addEntry: empty label'],
+    [`addEntry {"label":[${BAD}]}`, 'addEntry: empty label'],
+    ['addEntry {"label":{}}', 'addEntry: empty label'],
+    [`setEntries [{"label":${BAD}}]`, 'setEntries: no usable entries'],
+    [`setTag {"id":${BAD},"tag":"good"}`, SET_TAG_ERROR],
+    [`setTag {"label":${BAD},"tag":"good"}`, SET_TAG_ERROR],
+  ]) {
+    const r = await hostile(viewerSays(input));
+    check(`sidecar: refuses !wheel ${input}`, refused(r, lastError), JSON.stringify(r));
+  }
+
+  // The action only relays strings, so chat can't send these, but another broadcaster
+  // could. The whole relay is dropped, even clearEntries with only a bad `user`, and
+  // only the try/catch around dispatch keeps the sidecar up.
+  const relay = (body) => () => fetch(`${HTTP}/mock/push`, { method: 'POST', body: JSON.stringify({ type: 'fortuna:command', ...body }) });
+  for (const body of [
+    { command: { toString: 1 } },
+    { command: 'clearEntries', value: { toString: 1 } },
+    { command: 'clearEntries', value: 'all', user: { toString: 1 } },
+    { command: 'clearEntries', value: 'all', userId: { toString: 1 } },
+  ]) {
+    const r = await hostile(relay(body));
+    check(`sidecar: drops a relay with non-text fields ${JSON.stringify(body)}`,
+      refused(r, 'a command failed: see the sidecar log'), JSON.stringify(r));
+  }
+
+  // A bad option keeps its old value and the window still opens. These updates come from
+  // the live state, so they also prove the rows above left the entries alone.
+  for (const opts of [`{"maxEntries":${BAD}}`, `{"windowSec":${BAD}}`, `{"maxEntries":[${BAD}]}`]) {
+    const r = await hostile(viewerSays(`openEntries ${opts}`));
+    const em = r.after?.entryMode;
+    check(`sidecar: !wheel openEntries ignores a bad option ${opts}`,
+      r.alive && em.open && em.maxEntries === modeBefore.maxEntries && em.windowSec === modeBefore.windowSec
+        && JSON.stringify(r.updates.at(-1)?.entries) === wheelJson, JSON.stringify(r));
+    const atClose = mark();
+    cmd('closeEntries');
+    await since(atClose, (d) => isUpdate(d) && !d.entryMode.open);
+  }
+
+  // setEntries replaces the list: a bad field costs only that field, a bad row only that
+  // row. Numbers still convert, as they always have.
+  for (const [input, want] of [
+    [`setEntries [{"label":"Keeper","user":${BAD}}]`, [{ label: 'Keeper' }]],
+    [`setEntries [{"label":"Keeper","userId":${BAD}}]`, [{ label: 'Keeper' }]],
+    [`setEntries [{"label":${BAD}},{"label":"Keeper"}]`, [{ label: 'Keeper' }]],
+    ['setEntries [{"label":42,"user":7,"userId":8}]', [{ label: '42', user: '7', userId: '8' }]],
+  ]) {
+    const r = await hostile(viewerSays(input));
+    const got = r.updates.at(-1)?.entries.map(({ label, user, userId }) => ({ label, user, userId }));
+    check(`sidecar: !wheel ${input} keeps what's usable`, r.alive && JSON.stringify(got) === JSON.stringify(want), JSON.stringify(r));
+  }
+
+  // An empty list still clears on purpose. Then the wheel goes back for the restart checks.
+  const rEmpty = await hostile(viewerSays('setEntries []'));
+  check('sidecar: !wheel setEntries [] still clears the wheel', rEmpty.alive && rEmpty.after.entryCount === 0, JSON.stringify(rEmpty));
+  const atRestore = mark();
+  cmd('setEntries', wheelJson);
+  await since(atRestore, (d) => isUpdate(d) && d.entries.length === wheelBefore.length);
 
   // ── Restart persistence ──
   const lastUpdate = client.events.filter(isUpdate).pop();
