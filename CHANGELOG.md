@@ -82,9 +82,9 @@ chat and control page shapes behave as designed over DoAction; a real chat trigg
 relays correctly and its `__source` reads as the event type's name; and a real Set
 Argument `command` = `spin` left the wheel idle with no loop. Not yet verified live:
 the Command Cooldown check, a real channel point redeem, approval or rejection, and
-the `__source` values they carry. The `__` refusal and the escaping were checked in
-the compiled action against a stub `CPH` and in a browser against the mock, not on
-Streamer.bot.
+the `__source` values they carry. The `__` refusal was checked in the compiled
+action against a stub `CPH` and in the mock, and the escaping in a browser against
+the mock. Neither was checked on Streamer.bot.
 
 ## [1.0.6] — 2026-07-29
 

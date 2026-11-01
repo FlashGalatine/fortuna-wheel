@@ -138,8 +138,8 @@ try {
     check('control: warns when sidecar is absent', warnShown, String(warnShown));
     await page.screenshot({ path: resolve(__dirname, 'control-render.png') });
 
-    // Status fields are text, whatever reaches the page. Relayed for real, through
-    // the plain `__status` path that older sidecars still use.
+    // Status fields are text, whatever reaches the page. Relayed for real, on the
+    // reserved args the sidecar's own status uses.
     const forged = {
       entryCount: '<img src=x onerror="window.__forged=1">',
       chatEntryCount: '<b id="forged-chat">9</b>',
