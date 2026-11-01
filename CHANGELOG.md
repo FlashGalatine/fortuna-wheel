@@ -25,7 +25,7 @@ reward does nothing or runs the viewer's text as a command.
 - **`verify` runs the real C# action.** It compiles `fortuna-command.cs` with the
   .NET Framework's `csc` against a stub `CPH` (`tools/action-harness.cs`) and
   reports those checks as skipped when `csc` is missing. The same rows also run
-  through the mock's copy of the mapping, so drift on any row fails — 157/157. This
+  through the mock's copy of the mapping, so drift on any row fails — 165/165. This
   proves the action's logic, not real Streamer.bot behavior.
 
 ### Changed
@@ -76,19 +76,21 @@ reward does nothing or runs the viewer's text as a command.
   `Number()` throw on that object, and the wheel stayed down until restarted.
   `setEntries`, `setTag` and `openEntries` could do the same. Now only text, numbers
   and booleans convert. An object or array `label` counts as empty, so `{}` no longer
-  makes an entry named `[object Object]`. A bad `user` or `userId` is dropped, and a
-  bad `maxEntries` or `windowSec` keeps its old value. A `setEntries` list with nothing
-  usable in it is refused instead of emptying the wheel, including a list of blank
-  labels; `[]` still clears. Anything that still throws is logged and dropped, with a
-  note on the control page, though it may leave that command half applied. Viewers can
-  still run any valid command on an unrestricted `!wheel`, so keep it restricted to
-  moderators.
+  makes an entry named `[object Object]`. A bad `user` or `userId` is dropped, and an
+  object, array or null `maxEntries` or `windowSec` keeps its old value. A `setEntries`
+  list with nothing usable in it is refused instead of emptying the wheel, including a
+  list of blank labels; `[]` still clears. A throw while a command is being handled is
+  logged and dropped, with the error on the control page, though it may leave that
+  command half applied. That doesn't cover the part of a command that runs later on a
+  timer, a spin's reveal or a timed entry window's close: a throw there still stops the
+  sidecar, though no known input causes one. Viewers can still run any valid command on
+  an unrestricted `!wheel`, so keep it restricted to moderators.
 
 ### Documentation
 
 - README: channel point setup, and the `verify` check count brought up to date.
 
-Verified offline: `verify` 157/157. Verified live on Streamer.bot 1.0.7, on pastes
+Verified offline: `verify` 165/165. Verified live on Streamer.bot 1.0.7, on pastes
 of the action from before the Command Cooldown check: it compiles; simulated redeem,
 chat and control page shapes behave as designed over DoAction; a real chat trigger
 relays correctly and its `__source` reads as the event type's name; and a real Set

@@ -202,6 +202,7 @@ async function testHttp() {
 // ── 4. Sidecar E2E ────────────────────────────────────────────────────────────
 
 let sidecarProc = null;
+let sidecarOut = '';
 
 function spawnSidecar(cfgPath) {
   const proc = spawn(process.execPath, [resolve(__dirname, 'fortuna-sidecar.mjs')], {
@@ -214,6 +215,7 @@ function spawnSidecar(cfgPath) {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  proc.stdout.on('data', (d) => { sidecarOut += d; });
   proc.stderr.on('data', (d) => process.stderr.write(`[sidecar-err] ${d}`));
   return proc;
 }
@@ -526,7 +528,6 @@ async function testSidecar() {
   const viewerSays = (rawInput) => () => cmd('!wheel', '', { commandId: 'trig-3', rawInput, user: 'viewer', userId: 'u666' });
   const wheelBefore = client.events.filter(isUpdate).pop().entries;
   const wheelJson = JSON.stringify(wheelBefore);
-  const modeBefore = parseStatus(sAlive).entryMode;
   const refused = (r, lastError) => r.alive && r.lastError === lastError && r.updates.length === 0 && r.after.entryCount === wheelBefore.length;
 
   const SET_TAG_ERROR = 'setTag: expected {id, tag} with tag good|bad|neutral';
@@ -534,7 +535,10 @@ async function testSidecar() {
     [`addEntry {"label":${BAD}}`, 'addEntry: empty label'],
     [`addEntry {"label":[${BAD}]}`, 'addEntry: empty label'],
     ['addEntry {"label":{}}', 'addEntry: empty label'],
+    ['addEntry {"label":["a"]}', 'addEntry: empty label'],
     [`setEntries [{"label":${BAD}}]`, 'setEntries: no usable entries'],
+    ['setEntries [{"label":"  "}]', 'setEntries: no usable entries'],
+    ['setEntries [1,"x",null]', 'setEntries: no usable entries'],
     [`setTag {"id":${BAD},"tag":"good"}`, SET_TAG_ERROR],
     [`setTag {"label":${BAD},"tag":"good"}`, SET_TAG_ERROR],
   ]) {
@@ -544,8 +548,11 @@ async function testSidecar() {
 
   // The action only relays strings, so chat can't send these, but another broadcaster
   // could. The whole relay is dropped, even clearEntries with only a bad `user`, and
-  // only the try/catch around dispatch keeps the sidecar up.
+  // only the try/catch around dispatch keeps the sidecar up. A field that doesn't throw,
+  // like {} or [], still converts and runs, as it always has.
   const relay = (body) => () => fetch(`${HTTP}/mock/push`, { method: 'POST', body: JSON.stringify({ type: 'fortuna:command', ...body }) });
+  const atRelayLog = sidecarOut.length;
+  let relayNote;
   for (const body of [
     { command: { toString: 1 } },
     { command: 'clearEntries', value: { toString: 1 } },
@@ -553,30 +560,45 @@ async function testSidecar() {
     { command: 'clearEntries', value: 'all', userId: { toString: 1 } },
   ]) {
     const r = await hostile(relay(body));
-    check(`sidecar: drops a relay with non-text fields ${JSON.stringify(body)}`,
-      refused(r, 'a command failed: see the sidecar log'), JSON.stringify(r));
+    relayNote = r.lastError;
+    check(`sidecar: drops a relay with a field that throws ${JSON.stringify(body)}`,
+      /^a command failed: \S/.test(relayNote ?? '') && refused(r, relayNote), JSON.stringify(r));
   }
+  // The log is the only record of the stack, and it arrives on another stream from the status.
+  const loggedStack = () => /\nTypeError: (.*)\n\s+at /.exec(sidecarOut.slice(atRelayLog));
+  for (let i = 0; i < 15 && !loggedStack(); i++) await sleep(100);
+  check('sidecar: a dropped relay shows its error and logs its stack',
+    relayNote === `a command failed: ${loggedStack()?.[1]}`, `${relayNote} | ${sidecarOut.slice(-300)}`);
 
   // A bad option keeps its old value and the window still opens. These updates come from
-  // the live state, so they also prove the rows above left the entries alone.
-  for (const opts of [`{"maxEntries":${BAD}}`, `{"windowSec":${BAD}}`, `{"maxEntries":[${BAD}]}`]) {
-    const r = await hostile(viewerSays(`openEntries ${opts}`));
-    const em = r.after?.entryMode;
-    check(`sidecar: !wheel openEntries ignores a bad option ${opts}`,
-      r.alive && em.open && em.maxEntries === modeBefore.maxEntries && em.windowSec === modeBefore.windowSec
-        && JSON.stringify(r.updates.at(-1)?.entries) === wheelJson, JSON.stringify(r));
+  // the live state, so they also prove the rows above left the entries alone. The options
+  // start non-zero, so one that reads as 0 shows up.
+  const closeWindow = async () => {
     const atClose = mark();
     cmd('closeEntries');
     await since(atClose, (d) => isUpdate(d) && !d.entryMode.open);
+  };
+  const atOptions = mark();
+  cmd('openEntries', '{"maxEntries":9,"windowSec":600}');
+  await since(atOptions, (d) => isUpdate(d) && d.entryMode.windowSec === 600);
+  await closeWindow();
+  for (const opts of [`{"maxEntries":${BAD}}`, `{"windowSec":${BAD}}`, `{"maxEntries":[${BAD}]}`, '{"maxEntries":null}', '{"windowSec":null}']) {
+    const r = await hostile(viewerSays(`openEntries ${opts}`));
+    const em = r.after?.entryMode;
+    check(`sidecar: !wheel openEntries ignores a bad option ${opts}`,
+      r.alive && em.open && em.maxEntries === 9 && em.windowSec === 600
+        && JSON.stringify(r.updates.at(-1)?.entries) === wheelJson, JSON.stringify(r));
+    await closeWindow();
   }
 
   // setEntries replaces the list: a bad field costs only that field, a bad row only that
-  // row. Numbers still convert, as they always have.
+  // row. Numbers and booleans still convert, as they always have.
   for (const [input, want] of [
     [`setEntries [{"label":"Keeper","user":${BAD}}]`, [{ label: 'Keeper' }]],
     [`setEntries [{"label":"Keeper","userId":${BAD}}]`, [{ label: 'Keeper' }]],
     [`setEntries [{"label":${BAD}},{"label":"Keeper"}]`, [{ label: 'Keeper' }]],
     ['setEntries [{"label":42,"user":7,"userId":8}]', [{ label: '42', user: '7', userId: '8' }]],
+    ['setEntries [{"label":true,"user":false,"userId":true}]', [{ label: 'true', user: 'false', userId: 'true' }]],
   ]) {
     const r = await hostile(viewerSays(input));
     const got = r.updates.at(-1)?.entries.map(({ label, user, userId }) => ({ label, user, userId }));
@@ -588,7 +610,9 @@ async function testSidecar() {
   check('sidecar: !wheel setEntries [] still clears the wheel', rEmpty.alive && rEmpty.after.entryCount === 0, JSON.stringify(rEmpty));
   const atRestore = mark();
   cmd('setEntries', wheelJson);
-  await since(atRestore, (d) => isUpdate(d) && d.entries.length === wheelBefore.length);
+  const uRestored = await since(atRestore, (d) => isUpdate(d) && d.entries.length === wheelBefore.length);
+  check('sidecar: setEntries takes back a saved list, ids included',
+    wheelBefore.length > 0 && JSON.stringify(uRestored?.entries) === wheelJson, JSON.stringify(uRestored?.entries ?? null));
 
   // ── Restart persistence ──
   const lastUpdate = client.events.filter(isUpdate).pop();

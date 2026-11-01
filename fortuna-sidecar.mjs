@@ -150,7 +150,7 @@ function textOf(v) {
 }
 
 function clampInt(v, min, max, fallback) {
-  if (v && typeof v === 'object') return fallback; // Number() can throw: see textOf
+  if (typeof v === 'object') return fallback; // Number() can throw (see textOf) and reads null as 0
   const n = Math.round(Number(v));
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, n));
@@ -467,16 +467,19 @@ function connectSb() {
       // Echo-loop guard: this client also hears its own fortuna:update /
       // fortuna:status broadcasts. Consume ONLY the command channel.
       if (!d || typeof d !== 'object' || d.type !== 'fortuna:command') return;
-      // The backstop: a command that throws is logged and dropped, so one message can't
-      // take the wheel off stream, though it may leave that command half applied. The
-      // String() calls belong inside it. The action only relays strings, so a field that
-      // throws here marks a bad relay, and running it with that field blank could do harm:
-      // clearEntries reads a blank value as "all".
+      // The backstop: a throw while handling a command is logged and dropped, though it may
+      // leave that command half applied. The timers a command arms (a spin's reveal, an entry
+      // window's close) run outside it, so a throw there still ends the process, though no
+      // known input causes one. The note carries the error because a hidden launch has no
+      // log to read. The String() calls belong inside it. The action only relays strings, so
+      // a field that throws here marks a bad relay, and running it with that field blank could
+      // do harm: clearEntries reads a blank value as "all". A field that doesn't throw, like
+      // {} or [], still converts and runs, as it always has.
       try {
         dispatch(String(d.command ?? ''), String(d.value ?? ''), d.user == null ? '' : String(d.user), d.userId == null ? '' : String(d.userId));
       } catch (err) {
-        lastError = 'a command failed: see the sidecar log';
-        log(`${lastError}\n${err.stack || err}`);
+        lastError = `a command failed: ${err?.message ?? err}`;
+        log(`${lastError}\n${err?.stack ?? err}`);
         try { pushStatus(); } catch { /* the log line is the record */ }
       }
     });
