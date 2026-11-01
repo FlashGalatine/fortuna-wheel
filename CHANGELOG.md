@@ -25,7 +25,7 @@ reward does nothing or runs the viewer's text as a command.
 - **`verify` runs the real C# action.** It compiles `fortuna-command.cs` with the
   .NET Framework's `csc` against a stub `CPH` (`tools/action-harness.cs`) and
   reports those checks as skipped when `csc` is missing. The same rows also run
-  through the mock's copy of the mapping, so drift on any row fails — 165/165. This
+  through the mock's copy of the mapping, so drift on any row fails — 167/167. This
   proves the action's logic, not real Streamer.bot behavior.
 
 ### Changed
@@ -90,7 +90,7 @@ reward does nothing or runs the viewer's text as a command.
 
 - README: channel point setup, and the `verify` check count brought up to date.
 
-Verified offline: `verify` 165/165. Verified live on Streamer.bot 1.0.7, on pastes
+Verified offline: `verify` 167/167. Verified live on Streamer.bot 1.0.7, on pastes
 of the action from before the Command Cooldown check: it compiles; simulated redeem,
 chat and control page shapes behave as designed over DoAction; a real chat trigger
 relays correctly and its `__source` reads as the event type's name; and a real Set

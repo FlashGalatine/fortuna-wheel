@@ -567,8 +567,9 @@ async function testSidecar() {
   // The log is the only record of the stack, and it arrives on another stream from the status.
   const loggedStack = () => /\nTypeError: (.*)\n\s+at /.exec(sidecarOut.slice(atRelayLog));
   for (let i = 0; i < 15 && !loggedStack(); i++) await sleep(100);
+  const relayStack = loggedStack();
   check('sidecar: a dropped relay shows its error and logs its stack',
-    relayNote === `a command failed: ${loggedStack()?.[1]}`, `${relayNote} | ${sidecarOut.slice(-300)}`);
+    !!relayStack && relayNote === `a command failed: ${relayStack[1]}`, `${relayNote} | ${sidecarOut.slice(-300)}`);
 
   // A bad option keeps its old value and the window still opens. These updates come from
   // the live state, so they also prove the rows above left the entries alone. The options
@@ -582,7 +583,7 @@ async function testSidecar() {
   cmd('openEntries', '{"maxEntries":9,"windowSec":600}');
   await since(atOptions, (d) => isUpdate(d) && d.entryMode.windowSec === 600);
   await closeWindow();
-  for (const opts of [`{"maxEntries":${BAD}}`, `{"windowSec":${BAD}}`, `{"maxEntries":[${BAD}]}`, '{"maxEntries":null}', '{"windowSec":null}']) {
+  for (const opts of [`{"maxEntries":${BAD}}`, `{"windowSec":${BAD}}`, `{"maxEntries":[${BAD}]}`, '{"maxEntries":[5]}', '{"windowSec":[]}', '{"maxEntries":null}', '{"windowSec":null}']) {
     const r = await hostile(viewerSays(`openEntries ${opts}`));
     const em = r.after?.entryMode;
     check(`sidecar: !wheel openEntries ignores a bad option ${opts}`,
