@@ -22,9 +22,11 @@ traceability.
 
 ### Fixed
 
-- **Viewer text could run as a command.** A reward that asks for text, attached
-  directly to `Fortuna Command`, fell through to the bare `rawInput` fallback, so
-  a viewer typing `clearEntries` wiped the wheel. Redeems now ignore that text.
+- **Viewer text could run as a command.** A Twitch reward that asks for text,
+  attached directly to `Fortuna Command`, fell through to the bare `rawInput`
+  fallback, so a viewer typing `clearEntries` wiped the wheel. Twitch redeems now
+  ignore that text. Kick rewards aren't detected yet and still reach the fallback,
+  so they need a separate action.
 
 ### Documentation
 
@@ -32,7 +34,7 @@ traceability.
   to add Set Argument "before this one", which reads as inside the action. A
   fixed `command` there also rewrites Fortuna's own status messages, so the wheel
   spins on its own and never stops. The header and README now point to a separate
-  action and warn against this.
+  action and warn against setting `command` or `value` there.
 - README: channel point setup, and the `verify` check count brought up to date.
 
 ## [1.0.6] — 2026-07-29

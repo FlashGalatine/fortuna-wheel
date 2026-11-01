@@ -17,11 +17,13 @@
 //   • Twitch Reward Redemption triggers — attach them directly too. SB sets
 //     `redemptionId` and no `command`; this action detects that and relays "spin".
 //     For a reward that should do something else, use a separate action as above.
+//     Kick rewards aren't detected, so they need a separate action too: attached
+//     directly, a viewer's text would hit the rawInput fallback and run as a command.
 //
-// NEVER add a Set Argument for `command` inside THIS action. The sidecar's status
-// relay and the control page's status probes run through here too, so a fixed
-// `command` rewrites every one of them: "spin" makes the wheel spin on its own,
-// forever.
+// NEVER add a Set Argument for `command` or `value` inside THIS action. The
+// sidecar's status relay and the control page's commands run through here too, so
+// a fixed value rewrites every one of them: `command` = "spin" makes the wheel spin
+// on its own, forever.
 //
 // Commands the sidecar understands (docs/PROTOCOL.md): addEntry, removeEntry,
 // setTag, clearEntries, setEntries, openEntries, closeEntries, entry, spin,

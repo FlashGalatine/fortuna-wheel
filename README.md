@@ -5,8 +5,8 @@ Chromium ≥ 80 streaming app): load it with names, objectives, or
 stipulations, hit **SPIN**, and the wheel decelerates onto a result. Entries
 carry a *good / bad / neutral* tag — a good draw pops confetti, a bad draw
 pours rain, neutral gets a subtle glow (all re-skinnable). Viewers can enter
-drawings from chat with `!entry` or spin the wheel with channel points. Theme
-designers can restyle the wheel with
+drawings from chat with `!entry` or spin the wheel with Twitch channel points.
+Theme designers can restyle the wheel with
 CSS variables or replace the whole presentation (Magic 8-ball, crystal ball…)
 — see [docs/THEMING.md](docs/THEMING.md).
 
@@ -80,7 +80,12 @@ sub-actions needed (the action detects them itself):
   `!wheel closeEntries`, `!wheel addEntry Run it back | bad`, `!wheel spin`.
   Consider restricting this trigger's permissions to moderators in SB.
 - **Twitch → Channel Reward → Reward Redemption** — pick your reward; every
-  redeem spins the wheel. Anything the viewer types is ignored.
+  redeem spins the wheel. Anything the viewer types is ignored. Don't use
+  *Reward Redemption Updated*: it also fires when you approve or reject a redeem,
+  which would spin the wheel again.
+
+Kick rewards aren't detected yet, so don't attach them here: a viewer's text
+would run as a command. Use a separate action, as described below.
 
 The redeem trigger needs the current `fortuna-command.cs`. If you set Fortuna up
 before it was added, paste the file into the action again and click Compile.
@@ -96,9 +101,10 @@ action: *Set Argument* `command` (and `value` if needed), then *Run Action*
 into an open drawing. A redeem while entries are closed does nothing, and still
 costs the points.
 
-> **Never add a *Set Argument* for `command` inside `Fortuna Command` itself.**
-> Fortuna's own status messages run through that action, so a fixed `command`
-> rewrites all of them. With `spin`, the wheel spins on its own and never stops.
+> **Never add a *Set Argument* for `command` or `value` inside `Fortuna Command`
+> itself.** Fortuna's own status messages and the control page's commands run
+> through that action, so a fixed value rewrites all of them. With `command` =
+> `spin`, the wheel spins on its own and never stops.
 
 ### 4. Run the sidecar
 
