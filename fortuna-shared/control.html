@@ -265,9 +265,9 @@
       $('drawn').hidden = true;
     }
     $('status').innerHTML =
-      `Entries: <b>${s.entryCount ?? 0}</b> (${s.chatEntryCount ?? 0} viewers)` +
+      `Entries: <b>${esc(s.entryCount ?? 0)}</b> (${esc(s.chatEntryCount ?? 0)} viewers)` +
       ` · Drawing: <b>${s.entryMode?.open ? 'OPEN' : 'closed'}</b>` +
-      (s.entryMode?.open && s.entryMode.secondsLeft != null ? ` · <b>${s.entryMode.secondsLeft}s</b> left` : '') +
+      (s.entryMode?.open && s.entryMode.secondsLeft != null ? ` · <b>${esc(s.entryMode.secondsLeft)}s</b> left` : '') +
       ` · Spinning: <b>${s.spinning ? 'YES' : 'no'}</b>` +
       (s.lastError ? `<br><span class="err">${esc(s.lastError)}</span>` : '');
   });

@@ -18,6 +18,7 @@
 //     Any other chat command "!foo" relays as lowercase "foo" with the text after it
 //     dropped, so only entry, spin and status work this way: use !wheel for the rest.
 //     A Command Cooldown trigger is ignored: a command on cooldown doesn't run.
+//     A chat command starting with "__" is refused: those are Fortuna's own.
 //   • Twitch Reward Redemption triggers — attach them directly too. SB sets
 //     `redemptionId` and no `command`; this action detects that and relays "spin".
 //     For a reward that should do something else, use a separate action as above.
@@ -95,6 +96,14 @@ public class CPHInline
                     // IS the sidecar command. Text typed after it is dropped, so a
                     // viewer can't pass options such as {"removeAfter":true}.
                     command = chatCmd;
+                }
+
+                // "__" commands are Fortuna's own. A viewer's "!wheel __status {...}"
+                // would otherwise fake the sidecar on the control page.
+                if (command.StartsWith("__", StringComparison.Ordinal))
+                {
+                    CPH.LogWarn("[Fortuna Command] refused a reserved command from chat: " + command);
+                    return true;
                 }
             }
             else if (CPH.TryGetArg("command", out c) && !string.IsNullOrWhiteSpace(c))

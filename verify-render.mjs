@@ -137,6 +137,21 @@ try {
     const warnShown = await page.locator('#sidecar-note').isVisible();
     check('control: warns when sidecar is absent', warnShown, String(warnShown));
     await page.screenshot({ path: resolve(__dirname, 'control-render.png') });
+
+    // Status fields are text, whatever reaches the page. Relayed for real, through
+    // the plain `__status` path that older sidecars still use.
+    const forged = {
+      entryCount: '<img src=x onerror="window.__forged=1">',
+      chatEntryCount: '<b id="forged-chat">9</b>',
+      entryMode: { open: true, secondsLeft: '<i id="forged-left">1</i>' },
+    };
+    await page.evaluate((v) => window.__FORTUNA_SEND_COMMAND('__status', v), JSON.stringify(forged));
+    await page.waitForFunction(() => document.getElementById('status').textContent.includes('Entries:'), null, { timeout: 5000 });
+    await sleep(500); // a failed image load reports asynchronously
+    const rendered = await page.locator('#status img, #status b#forged-chat, #status i#forged-left').count();
+    const statusText = await page.locator('#status').textContent();
+    check('control: HTML in a status stays text', rendered === 0 && statusText.includes(forged.entryCount), statusText);
+    check('control: a status can\'t run script', (await page.evaluate(() => window.__forged ?? null)) === null);
     await page.close();
   }
 } catch (err) {

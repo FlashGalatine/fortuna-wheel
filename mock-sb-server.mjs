@@ -245,6 +245,8 @@ wss.on('connection', (ws) => {
             command = chatCmd;
             value = '';
           }
+          // "__" commands are Fortuna's own: chat can't send them.
+          if (command.startsWith('__')) command = '';
         } else if (!command && String(args.redemptionId ?? '').trim()) {
           // A Reward Redemption trigger attached directly: a redeem spins, unless
           // Reward Redemption Updated is reporting an approval or rejection.
