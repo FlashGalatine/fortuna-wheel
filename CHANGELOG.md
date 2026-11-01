@@ -10,32 +10,70 @@ traceability.
 
 ## [Unreleased]
 
+**To upgrade,** follow "Updating an existing install" in the README: get the new
+files, stop the sidecar, paste the new `fortuna-command.cs` into the action, click
+Compile, then start the sidecar and reload the control page and any OBS docks. The
+self-spin fix needs all of them current. On the old action, a directly attached
+reward does nothing or runs the viewer's text as a command.
+
 ### Added
 
 - **Channel point redeems.** A Twitch Reward Redemption trigger can attach
   straight onto `Fortuna Command`: the action detects `redemptionId` and relays
   `spin`, with no Set Argument needed. A separate action that sets its own
-  `command` still wins, so a reward can mean something else (`entry`, say). The
-  mock reproduces the trigger shape and `verify` covers it — 53/53. **To upgrade,**
-  paste the new `fortuna-command.cs` into the action and click Compile; on the old
-  code this trigger does nothing, or runs the viewer's text as a command.
+  `command` still wins, so a reward can mean something else (`entry`, say).
+- **`verify` runs the real C# action.** It compiles `fortuna-command.cs` with the
+  .NET Framework's `csc` against a stub `CPH` (`tools/action-harness.cs`) and
+  reports those checks as skipped when `csc` is missing. The same rows also run
+  through the mock's copy of the mapping, so drift on any row fails — 125/125. This
+  proves the action's logic, not real Streamer.bot behavior.
+
+### Changed
+
+- **Chat commands other than `!wheel` drop the text typed after them.**
+
+### Removed
+
+- **The bare `rawInput` fallback.** A `Fortuna Command` run with no `command` no
+  longer treats `rawInput` as one. A setup that used Set Argument `rawInput` =
+  `<command>` must set `command` from a separate action instead.
 
 ### Fixed
 
-- **Viewer text could run as a command.** A Twitch reward that asks for text,
-  attached directly to `Fortuna Command`, fell through to the bare `rawInput`
-  fallback, so a viewer typing `clearEntries` wiped the wheel. Twitch redeems now
-  ignore that text. Kick rewards aren't detected yet and still reach the fallback,
-  so they need a separate action.
+- **Viewer text could run as a command.** A reward that asks for text, or any other
+  trigger carrying `rawInput`, attached directly to `Fortuna Command` reached the
+  fallback, so a viewer typing `clearEntries` wiped the wheel. Now only `!wheel`
+  passes text on as a command, so restrict that trigger to moderators. Kick rewards
+  aren't detected yet: attached directly they do nothing, so they need a separate
+  action.
+- **Viewers could pass spin options.** A `!spin` trigger forwarded the text after
+  it, so `!spin {"removeAfter":true}` removed the winner.
+- **Self-spinning wheel.** The `fortuna-command.cs` header told Stream Deck setups
+  to add Set Argument "before this one", which reads as inside the action. A fixed
+  `command` there rewrote Fortuna's own status messages, so the wheel spun on its
+  own and never stopped. The sidecar and control page now repeat their command in
+  reserved `fortunaCommand` + `fortunaValue` arguments that the action reads first.
+  A Set Argument for `command` there still rewrites every trigger and Stream Deck
+  call, so the header and README point to a separate action and warn against it.
+- **Approving or rejecting a redeem could spin the wheel.** Reward Redemption
+  Updated also sets `redemptionId`. Attached directly, it is now ignored, identified
+  by `__source`, with a `rewardStatus` of `fulfilled` or `canceled` as the fallback
+  for any source other than the plain Reward Redemption trigger. A separate action
+  that sets its own `command` still runs.
+- **A command on cooldown still ran.** A Command Cooldown trigger also sets
+  `commandId`, so it was treated as the command itself. It is now ignored.
 
 ### Documentation
 
-- **Self-spinning wheel.** The `fortuna-command.cs` header told Stream Deck setups
-  to add Set Argument "before this one", which reads as inside the action. A
-  fixed `command` there also rewrites Fortuna's own status messages, so the wheel
-  spins on its own and never stops. The header and README now point to a separate
-  action and warn against setting `command` or `value` there.
 - README: channel point setup, and the `verify` check count brought up to date.
+
+Verified offline: `verify` 125/125. Verified live on Streamer.bot 1.0.7, on pastes
+of the action from before the Command Cooldown check: it compiles; simulated redeem,
+chat and control page shapes behave as designed over DoAction; a real chat trigger
+relays correctly and its `__source` reads as the event type's name; and a real Set
+Argument `command` = `spin` left the wheel idle with no loop. Not yet verified live:
+the Command Cooldown check, a real channel point redeem, approval or rejection, and
+the `__source` values they carry.
 
 ## [1.0.6] — 2026-07-29
 

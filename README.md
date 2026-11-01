@@ -78,17 +78,28 @@ sub-actions needed (the action detects them itself):
   relayed automatically (one entry per viewer).
 - **Command** `!wheel <cmd> [value…]` — mod controls: `!wheel openEntries`,
   `!wheel closeEntries`, `!wheel addEntry Run it back | bad`, `!wheel spin`.
-  Consider restricting this trigger's permissions to moderators in SB.
+  Restrict this trigger to moderators in SB: by default, anyone in chat can run a
+  command, and this one can wipe the wheel.
 - **Twitch → Channel Reward → Reward Redemption** — pick your reward; every
-  redeem spins the wheel. Anything the viewer types is ignored. Don't use
-  *Reward Redemption Updated*: it also fires when you approve or reject a redeem,
-  which would spin the wheel again.
+  redeem spins the wheel. Anything the viewer types is ignored. Use this trigger,
+  not *Reward Redemption Updated*, which fires when you approve or reject a redeem.
+  Attached here, Fortuna ignores it; a separate action that sets its own `command`
+  still runs on every approve and reject. Test with a real redeem, because
+  Streamer.bot's Test Trigger may not set the arguments Fortuna looks for. On
+  Streamer.bot 1.0.7, Test Trigger on *Reward Redemption Updated* with no reward
+  picked crashed Streamer.bot itself, so avoid it.
 
-Kick rewards aren't detected yet, so don't attach them here: a viewer's text
-would run as a command. Use a separate action, as described below.
+Kick rewards aren't detected yet, so attached here they do nothing. Use a separate
+action, as described below.
 
-The redeem trigger needs the current `fortuna-command.cs`. If you set Fortuna up
-before it was added, paste the file into the action again and click Compile.
+**Updating an existing install:**
+
+1. Get the new files (`git pull`, or extract the new ZIP over your folder).
+2. Stop the sidecar by closing its window. If `Fortuna Sidecar Start` launched it,
+   end its `node.exe` in Task Manager: it has no window, and a new copy exits
+   without replacing a running one.
+3. Paste the current `fortuna-command.cs` into the action and click Compile.
+4. Start the sidecar again, and reload the control page and any OBS docks.
 
 **Set a cooldown of at least 10 seconds on a spin reward** (in its Twitch
 settings). A spin takes up to about 8 seconds, and a redeem is refused while the
@@ -102,9 +113,12 @@ into an open drawing. A redeem while entries are closed does nothing, and still
 costs the points.
 
 > **Never add a *Set Argument* for `command` or `value` inside `Fortuna Command`
-> itself.** Fortuna's own status messages and the control page's commands run
-> through that action, so a fixed value rewrites all of them. With `command` =
-> `spin`, the wheel spins on its own and never stops.
+> itself.** A fixed `command` rewrites every trigger and Stream Deck call that
+> reaches the action: with `spin`, any viewer's `!entry` spins the wheel. A fixed
+> `value` replaces every Stream Deck call's value. If the sidecar or action is out of
+> date, it also rewrites Fortuna's own status messages, and the wheel spins on its
+> own and never stops. An out-of-date control page spins it at every status check
+> until you reload it.
 
 ### 4. Run the sidecar
 
@@ -133,10 +147,13 @@ launches harmless.
 
 - `npm start` — mock Streamer.bot (HTTP :7474 + WS :8080) with a landing page;
   `/mock/fixture` broadcasts a sample wheel, POST `/mock/push` any payload.
-- `npm run verify` — 53 offline checks: spin math determinism, the real
+- `npm run verify` — 125 offline checks: spin math determinism, the real
   panel-core against the mock (subscribe case, sync replay, serialized queue),
-  HTTP maps, and a real sidecar E2E (entry CRUD, `!entry` dedupe/limits, spin
-  lifecycle, channel point redeems, restart persistence). Uses off-default ports
+  HTTP maps, the mock's copy of the action's mapping, a real sidecar E2E (entry CRUD,
+  `!entry` dedupe/limits, spin lifecycle, channel point redeems, restart
+  persistence), and the real `fortuna-command.cs` against a stub `CPH`. Those last 36
+  need the .NET Framework's `csc.exe` and are reported as skipped without it; they
+  prove the action's logic, not real Streamer.bot behavior. Uses off-default ports
   (7478/8084/7494) so it runs beside a live SB.
 - `npm run verify:render` — real-pixel checks in a system Edge/Chrome
   (`npm i --no-save playwright-core` first): painted wheel, revealed draw with

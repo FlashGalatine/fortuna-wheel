@@ -10,6 +10,8 @@
 //       /mock/fixture         -> loads fixtures/sample-update.json, stores +
 //                                broadcasts it (quick styling data)
 //       /mock/stats           -> { pushCount, commandCount, clients } for verify
+//       /mock/set-args (POST) -> body = arguments forced onto every "Fortuna
+//                                Command" run, like a Set Argument inside it
 //       /                     -> a landing index for quick manual testing
 //   • WebSocket Server on :8080 — speaks SB's envelope. On `Subscribe` it acks
 //     (enforcing the lowercase `general` key exactly like real SB); on
@@ -104,11 +106,29 @@ Feed live data by running the sidecar against this mock:
 <p class="dim">Stored payload: ${storedPayload ? storedPayload.length + ' bytes' : '(none — sync replays an empty update)'}</p>`;
 }
 
+// Simulates Set Argument sub-actions inside "Fortuna Command" (/mock/set-args):
+// these overwrite the matching arguments on every run of the action.
+let setArgs = {};
+
 // ── HTTP server (SB HTTP Server mimic) ───────────────────────────────────────
 const http = createServer(async (req, res) => {
   const url = req.url || '/';
   const path = decodeURIComponent(url.split('?')[0]);
 
+  if (path === '/mock/set-args' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      try { setArgs = JSON.parse(body || '{}'); } catch {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end('{"ok":false,"error":"body is not JSON"}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+    return;
+  }
   if (path === '/mock/push' && req.method === 'POST') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -204,38 +224,43 @@ wss.on('connection', (ws) => {
           console.log('[mock] Fortuna Push (sync replay)');
         }
       } else if (name === 'Fortuna Command') {
-        let command = String(m.args?.command ?? '');
-        let value = m.args?.value == null ? '' : String(m.args.value);
-        const raw = String(m.args?.rawInput ?? '').trim();
-        // Chat Command triggers set their own `command` ("!entry") + commandId;
-        // mirror fortuna-command.cs's mapping so verify covers the chat path.
-        if (m.args?.commandId) {
-          const chatCmd = command.trim().replace(/^!/, '').toLowerCase();
+        const args = { ...m.args, ...setArgs };
+        let command = String(args.command ?? '').trim();
+        let value = args.value == null ? '' : String(args.value);
+        // Mirror fortuna-command.cs's mapping so verify covers these paths. Fortuna's
+        // own traffic repeats its command in reserved args a Set Argument can't touch.
+        if (String(args.fortunaCommand ?? '').trim()) {
+          command = String(args.fortunaCommand).trim();
+          value = args.fortunaValue == null ? '' : String(args.fortunaValue);
+        } else if (String(args.commandId ?? '').trim()) {
+          // Chat Command triggers set their own `command` ("!entry") + commandId.
+          // Command Cooldown sets the same two, but a cooldown must not run the command.
+          const chatCmd = String(args.__source ?? '') === 'CommandCooldown' ? '' : command.replace(/^!+/, '').toLowerCase();
           if (chatCmd === 'wheel') {
+            const raw = String(args.rawInput ?? '').trim();
             const sp = raw.indexOf(' ');
             command = sp < 0 ? raw : raw.slice(0, sp);
             value = sp < 0 ? '' : raw.slice(sp + 1).trim();
           } else {
             command = chatCmd;
-            value = raw;
+            value = '';
           }
-        } else if (!command.trim() && m.args?.redemptionId) {
-          // A Reward Redemption trigger attached directly: a redeem spins, and the
-          // viewer-typed rawInput never reaches the fallback below.
-          command = 'spin';
+        } else if (!command && String(args.redemptionId ?? '').trim()) {
+          // A Reward Redemption trigger attached directly: a redeem spins, unless
+          // Reward Redemption Updated is reporting an approval or rejection.
+          const source = String(args.__source ?? '');
+          const status = String(args.rewardStatus ?? '').trim().toLowerCase();
+          const updated = source === 'TwitchRewardRedemptionUpdated'
+            || (source !== 'TwitchRewardRedemption' && (status === 'fulfilled' || status === 'canceled'));
+          command = updated ? '' : 'spin';
           value = '';
-        } else if (!command.trim() && raw) {
-          // The action's bare rawInput fallback: first word = command, rest = value.
-          const sp = raw.indexOf(' ');
-          command = sp < 0 ? raw : raw.slice(0, sp);
-          value = sp < 0 ? '' : raw.slice(sp + 1).trim();
         }
         if (command) {
           stats.commandCount++;
           const out = { type: 'fortuna:command', command, value };
           // The real action relays the chat trigger's user args when present.
-          if (m.args?.user != null) out.user = String(m.args.user);
-          if (m.args?.userId != null) out.userId = String(m.args.userId);
+          if (String(args.user ?? '').trim()) out.user = String(args.user);
+          if (String(args.userId ?? '').trim()) out.userId = String(args.userId);
           broadcast(customEvent(JSON.stringify(out)));
           console.log(`[mock] Fortuna Command → ${command}`);
         }

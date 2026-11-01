@@ -4,16 +4,20 @@
 //   2. Mock-SB E2E: the REAL panel-core.js runs in a browser shim against the
 //      mock server — Subscribe (lowercase), sync-on-connect replay, live push,
 //      serialized command queue.
-//   3. Mock HTTP maps.
+//   3. Mock HTTP maps, and the mock's copy of the action's mapping (same rows as 5).
 //   4. Sidecar E2E: the REAL fortuna-sidecar.mjs runs against the mock —
 //      entry CRUD, chat !entry dedupe + limits + auto-close, spin lifecycle
 //      (spinning → revealed), channel point redeems, removeOnDraw / removeDrawn,
 //      restart persistence.
+//   5. The REAL actions/fortuna-command.cs, compiled with the .NET Framework's csc
+//      against a stub CPH (tools/action-harness.cs). Proves its logic and C# 5
+//      syntax, not real Streamer.bot behavior. Skipped when csc isn't installed.
 //
 // Uses off-default ports (HTTP 7478 / WS 8084 / guard 7494) so it can run next
 // to a live Streamer.bot or sidecar. Run: npm run verify
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { readFile, writeFile, rm } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +32,7 @@ const HTTP = `http://127.0.0.1:${HTTP_PORT}`;
 const WS_URL = `ws://127.0.0.1:${WS_PORT}/`;
 const SPIN_MS = 500; // fast spins for the suite (FORTUNA_SPIN_MS)
 
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, skipped = 0;
 function check(name, ok, detail) {
   if (ok) { pass++; console.log(`  ✔ ${name}`); }
   else { fail++; console.log(`  ✘ ${name}${detail ? ` — ${detail}` : ''}`); }
@@ -402,10 +406,7 @@ async function testSidecar() {
   // it: the reward args and NO `command`. rawInput is whatever the viewer typed.
   const redeem = (rawInput, extra) => client.ws.send(JSON.stringify({
     request: 'DoAction', id: 'r', action: { name: 'Fortuna Command' },
-    args: {
-      redemptionId: 'rd-1', rewardId: 'rw-1', rewardName: 'Spin the wheel', rewardCost: 100,
-      rawInput, user: 'redeemer', userName: 'redeemer', userId: 'u200', ...(extra || {}),
-    },
+    args: { ...REDEEM, rawInput, ...(extra || {}) },
   }));
   const entriesBeforeRedeem = client.events.filter(isUpdate).pop().entries.length;
 
@@ -436,6 +437,47 @@ async function testSidecar() {
   cmd('closeEntries');
   cmd('clearEntries', 'chat');
   await since(atRedeemCleanup, (d) => isUpdate(d) && !d.entryMode.open && !d.entries.some((e) => e.userId === 'u200'));
+
+  // A Set Argument for `command` inside the action must not turn Fortuna's own
+  // traffic into spins: the real panel-core asks for status and the real sidecar
+  // answers, both under the hijack. Cleared before checking, to end a regression's
+  // flood. waitForProof waits on the round trip itself, up to a bound, so a slow
+  // machine can't fail these.
+  const setArgs = (args) => fetch(`${HTTP}/mock/set-args`, { method: 'POST', body: JSON.stringify(args) });
+  const waitForProof = async (at, label) => {
+    await since(at, (d) => isUpdate(d) && d.entries.some((e) => e.label === label), 1500);
+    await since(at, (d) => isStatus(d) && d.value.startsWith('{'), 1500);
+  };
+  const atHijack = mark();
+  await setArgs({ command: 'spin', value: 'x' });
+  globalThis.window.__FORTUNA_SEND_COMMAND('addEntry', JSON.stringify({ label: 'Hijack proof', tag: 'good' }));
+  await waitForProof(atHijack, 'Hijack proof');
+  await setArgs({});
+  const hijacked = client.events.slice(atHijack);
+  check('sidecar: Set Argument command=spin can\'t rewrite Fortuna\'s own traffic',
+    hijacked.some((d) => isUpdate(d) && d.entries.some((e) => e.label === 'Hijack proof'))
+      && hijacked.some((d) => isStatus(d) && d.value.startsWith('{'))
+      && !hijacked.some((d) => d.type === 'fortuna:command' && d.command === 'spin'),
+    `${hijacked.filter((d) => d.command === 'spin').length} spin commands, ${hijacked.filter(isStatus).length} status replies`);
+  const atHijackCleanup = mark();
+  cmd('removeEntry', 'Hijack proof');
+  await since(atHijackCleanup, (d) => isUpdate(d) && d.spin?.state !== 'spinning' && !d.entries.some((e) => e.label === 'Hijack proof'));
+
+  // An action pasted before the reserved args existed ignores them, so the real
+  // panel-core and sidecar must keep sending plain command + value as well.
+  const atOldAction = mark();
+  await setArgs({ fortunaCommand: '', fortunaValue: '' });
+  globalThis.window.__FORTUNA_SEND_COMMAND('addEntry', JSON.stringify({ label: 'Old action proof', tag: 'good' }));
+  await waitForProof(atOldAction, 'Old action proof');
+  await setArgs({});
+  const onOldAction = client.events.slice(atOldAction);
+  check('sidecar: page and sidecar still work with an older action',
+    onOldAction.some((d) => isUpdate(d) && d.entries.some((e) => e.label === 'Old action proof'))
+      && onOldAction.some((d) => isStatus(d) && d.value.startsWith('{')),
+    `${onOldAction.filter(isStatus).length} status replies`);
+  const atOldActionCleanup = mark();
+  cmd('removeEntry', 'Old action proof');
+  await since(atOldActionCleanup, (d) => isUpdate(d) && !d.entries.some((e) => e.label === 'Old action proof'));
 
   // setSettings batch.
   cmd('setSettings', JSON.stringify({ removeOnDraw: true, defaultChatTag: 'neutral' }));
@@ -469,6 +511,111 @@ async function testSidecar() {
   await rm(cfgPath, { force: true });
 }
 
+// ── 5. The real C# action ─────────────────────────────────────────────────────
+
+// Hand-written call shapes. want = the one command relayed; null = nothing relayed.
+// ignored = dropped on purpose, so Execute still returns true. Any other null row
+// found no command, and returns false.
+const REDEEM = { redemptionId: 'rd-1', rewardId: 'rw-1', rewardName: 'Spin the wheel', user: 'redeemer', userId: 'u200' };
+const ACTION_ROWS = [
+  { name: 'control page command', args: { command: 'status', value: '', fortunaCommand: 'status', fortunaValue: '' }, want: { command: 'status' } },
+  { name: 'older sidecar still relays', args: { command: '__status', value: '{}' }, want: { command: '__status', value: '{}' } },
+  { name: 'Set Argument can\'t rewrite the status relay', args: { command: 'spin', value: 'x', fortunaCommand: '__status', fortunaValue: '{"a":1}' }, want: { command: '__status', value: '{"a":1}' } },
+  { name: 'reserved command ignores a fixed value', args: { fortunaCommand: 'status', value: 'x' }, want: { command: 'status' } },
+  { name: 'chat !entry relays the viewer', args: { command: '!entry', commandId: 'c1', rawInput: 'hi', user: 'chatter', userId: 'u1' }, want: { command: 'entry', user: 'chatter', userId: 'u1' } },
+  { name: 'chat !wheel splits command and value', args: { command: '!wheel', commandId: 'c2', rawInput: 'addEntry Run it back | bad' }, want: { command: 'addEntry', value: 'Run it back | bad' } },
+  { name: 'chat !wheel keeps non-ASCII text', args: { command: '!wheel', commandId: 'c2', rawInput: 'addEntry Привет | good' }, want: { command: 'addEntry', value: 'Привет | good' } },
+  { name: 'chat !wheel spin keeps its options', args: { command: '!wheel', commandId: 'c2', rawInput: 'spin {"removeAfter":true}' }, want: { command: 'spin', value: '{"removeAfter":true}' } },
+  { name: 'chat !spin drops viewer text', args: { command: '!spin', commandId: 'c3', rawInput: '{"removeAfter":true}' }, want: { command: 'spin' } },
+  { name: 'redeem spins', args: { ...REDEEM, rawInput: '' }, want: { command: 'spin', user: 'redeemer' } },
+  { name: 'redeem with no rawInput spins', args: REDEEM, want: { command: 'spin' } },
+  { name: 'redeem text never runs as a command', args: { ...REDEEM, rawInput: 'clearEntries' }, want: { command: 'spin' } },
+  { name: 'redeem with another status still spins', args: { ...REDEEM, rewardStatus: 'unfulfilled' }, want: { command: 'spin' } },
+  { name: 'a separate action\'s command beats the redeem default', args: { ...REDEEM, command: 'entry' }, want: { command: 'entry', user: 'redeemer' } },
+  { name: 'approving a redeem doesn\'t spin', args: { ...REDEEM, rewardStatus: ' fulfilled ' }, want: null, ignored: true },
+  { name: 'rejecting a redeem doesn\'t spin', args: { ...REDEEM, rewardStatus: 'Canceled' }, want: null, ignored: true },
+  { name: 'a Skip Queue redeem marked fulfilled still spins', args: { ...REDEEM, __source: 'TwitchRewardRedemption', rewardStatus: 'fulfilled' }, want: { command: 'spin' } },
+  { name: 'Reward Redemption Updated is ignored', args: { ...REDEEM, __source: 'TwitchRewardRedemptionUpdated' }, want: null, ignored: true },
+  { name: 'Reward Redemption Updated is ignored with any status', args: { ...REDEEM, __source: 'TwitchRewardRedemptionUpdated', rewardStatus: 'unfulfilled' }, want: null, ignored: true },
+  { name: 'a final status is ignored under another source', args: { ...REDEEM, __source: 'SomethingElse', rewardStatus: 'canceled' }, want: null, ignored: true },
+  { name: 'a blank command relays nothing', args: { command: '   ' }, want: null },
+  { name: 'a blank redemptionId relays nothing', args: { redemptionId: '  ', rawInput: 'spin' }, want: null },
+  { name: 'a redeem with a null __source spins', args: { ...REDEEM, __source: null }, want: { command: 'spin' } },
+  { name: 'a blank commandId isn\'t a chat trigger', args: { command: 'addEntry', value: 'Thing', commandId: '  ' }, want: { command: 'addEntry', value: 'Thing' } },
+  { name: 'every leading ! is stripped from a chat command', args: { command: '!!entry', commandId: 'c1' }, want: { command: 'entry' } },
+  { name: 'a blank reserved command falls through', args: { fortunaCommand: '  ', command: 'status' }, want: { command: 'status' } },
+  { name: 'a blank user isn\'t relayed', args: { command: 'status', user: ' ', userId: '' }, want: { command: 'status', user: null, userId: null } },
+  { name: 'a real Guid commandId reads as a chat trigger', args: { command: '!entry', commandId: '11111111-2222-3333-4444-555555555555', user: 'chatter' }, want: { command: 'entry', user: 'chatter' } },
+  { name: 'a real Command Triggered run isn\'t taken for a cooldown', args: { __source: 'CommandTriggered', command: '!entry', commandId: '11111111-2222-3333-4444-555555555555', user: 'chatter' }, want: { command: 'entry', user: 'chatter' } },
+  { name: 'Command Cooldown doesn\'t run the command', args: { __source: 'CommandCooldown', command: '!spin', commandId: 'c3', rawInput: '' }, want: null, ignored: true },
+  { name: 'a separate action on Reward Redemption Updated keeps its command', args: { ...REDEEM, __source: 'TwitchRewardRedemptionUpdated', command: 'entry' }, want: { command: 'entry', user: 'redeemer' } },
+  { name: 'Kick reward text never runs as a command', args: { rawInput: 'clearEntries', 'reward.id': 'k1' }, want: null },
+  { name: 'other trigger text never runs as a command', args: { rawInput: 'clearEntries', message: 'clearEntries' }, want: null },
+  { name: 'no arguments relays nothing', args: {}, want: null },
+];
+
+const rowMatches = (row, relayed) => (row.want === null
+  ? relayed.length === 0
+  : relayed.length === 1 && relayed[0].type === 'fortuna:command' && relayed[0].command === row.want.command
+    && relayed[0].value === (row.want.value ?? '') && (row.want.user === undefined || (relayed[0].user ?? null) === row.want.user)
+    && (row.want.userId === undefined || (relayed[0].userId ?? null) === row.want.userId));
+
+// The mock keeps its own copy of the action's mapping, so the same rows must pass
+// there too: drift on any row fails. Runs before the sidecar starts, because rows
+// include spins. A marker after each row shows when all it relayed has arrived.
+async function testMockMapping() {
+  const client = await wsClient();
+  const doAction = (args) => client.ws.send(JSON.stringify({ request: 'DoAction', id: 'm', action: { name: 'Fortuna Command' }, args }));
+  for (const [i, row] of ACTION_ROWS.entries()) {
+    const at = client.events.length;
+    doAction(row.args);
+    doAction({ command: '__row_end', value: String(i) });
+    await client.next((d) => d.command === '__row_end' && d.value === String(i));
+    const relayed = client.events.slice(at).filter((d) => d.command !== '__row_end');
+    check(`mock mapping: ${row.name}`, rowMatches(row, relayed), JSON.stringify(relayed));
+  }
+  client.ws.close();
+}
+
+function testAction() {
+  console.log('\n[5] Fortuna Command (real C#, stub CPH)');
+  const csc = process.env.WINDIR ? resolve(process.env.WINDIR, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe') : '';
+  if (!csc || !existsSync(csc)) {
+    skipped += ACTION_ROWS.length + 2; // the rows plus the compile and harness checks
+    console.log('  - skipped: the .NET Framework compiler (csc.exe) isn\'t installed');
+    return;
+  }
+  const dir = mkdtempSync(resolve(tmpdir(), 'fortuna-verify-cs-'));
+  try {
+    const exe = resolve(dir, 'harness.exe');
+    const build = spawnSync(csc, ['-nologo', '-r:System.Web.Extensions.dll', `-out:${exe}`,
+      resolve(__dirname, 'tools', 'action-harness.cs'), resolve(__dirname, 'actions', 'fortuna-command.cs')], { encoding: 'utf-8', timeout: 60000 });
+    check('action: compiles as C# 5', build.status === 0, build.stdout || build.error?.message);
+    if (build.status !== 0) return;
+
+    const run = spawnSync(exe, [], { input: JSON.stringify(ACTION_ROWS.map((r) => r.args)), encoding: 'utf-8', timeout: 20000 });
+    // Blocked from starting (antivirus, say) is a skip. A timeout means the action hung.
+    if (run.error && run.error.code !== 'ETIMEDOUT') {
+      skipped += ACTION_ROWS.length + 1; // the rows plus the harness check
+      console.log(`  - skipped: couldn't run the compiled harness (${run.error.message})`);
+      return;
+    }
+    let results = null;
+    try { results = run.status === 0 ? JSON.parse(run.stdout) : null; } catch { /* reported below */ }
+    check('action: harness ran every row', results?.length === ACTION_ROWS.length, run.error?.message || run.stderr || run.stdout);
+    if (results?.length !== ACTION_ROWS.length) return;
+
+    ACTION_ROWS.forEach((row, i) => {
+      const relayed = results[i].broadcasts.map((b) => JSON.parse(b));
+      const wantReturned = row.want !== null || row.ignored === true;
+      check(`action: ${row.name}`, rowMatches(row, relayed) && results[i].returned === wantReturned,
+        `returned ${results[i].returned}: ${results[i].broadcasts.join(' | ') || '(nothing relayed)'}`);
+    });
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* AV can hold the exe briefly */ }
+  }
+}
+
 // ── Run ───────────────────────────────────────────────────────────────────────
 
 try {
@@ -476,6 +623,7 @@ try {
   await startMock();
   await testPanelCore();
   await testHttp();
+  await testMockMapping();
   await testSidecar();
 } catch (err) {
   fail++;
@@ -485,5 +633,13 @@ try {
   try { mockProc?.kill(); } catch {}
 }
 
-console.log(`\n${fail === 0 ? 'ALL GREEN' : 'FAILURES'} — ${pass} passed, ${fail} failed`);
+// Runs even if a section above died: it needs neither the mock nor the sidecar.
+try {
+  testAction();
+} catch (err) {
+  fail++;
+  console.error(`\nFATAL: ${err.stack || err}`);
+}
+
+console.log(`\n${fail === 0 ? 'ALL GREEN' : 'FAILURES'} — ${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`);
 process.exit(fail === 0 ? 0 : 1);

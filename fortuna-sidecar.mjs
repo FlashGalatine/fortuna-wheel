@@ -203,7 +203,11 @@ function pushStatus() {
     settings: { ...config.settings },
     lastError,
   };
-  doAction('Fortuna Command', { command: '__status', value: JSON.stringify(status) });
+  // The reserved pair wins in the C# action, so a Set Argument for `command` inside
+  // it can't turn this into a spin. `command`/`value` keep older actions working, at
+  // the cost of sending the JSON twice: drop them once those actions are unsupported.
+  const json = JSON.stringify(status);
+  doAction('Fortuna Command', { command: '__status', value: json, fortunaCommand: '__status', fortunaValue: json });
 }
 
 function applyChange() {
