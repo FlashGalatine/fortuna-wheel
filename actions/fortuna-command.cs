@@ -6,13 +6,24 @@
 //
 // Call styles:
 //   • control.html — DoAction args { command:"spin", value:"{\"removeAfter\":true}" }
-//   • Stream Deck  — Set Argument sub-actions before this one, same two args
+//   • Stream Deck  — a SEPARATE action: Set Argument `command` (and `value`), then
+//     Core -> Actions -> Run Action -> this one
 //   • Chat Command triggers — attach them directly, NO Set Argument needed.
 //     SB command triggers set their own `command` (the matched chat command,
 //     e.g. "!entry") + `commandId`; this action detects that and maps:
 //       "!entry"                → command "entry" (user/userId relayed for dedupe)
 //       "!wheel <cmd> [value…]" → first word of rawInput = command, rest = value
 //     Any other chat command "!foo" relays as command "foo" with rawInput as value.
+//   • Twitch Reward Redemption triggers — attach them directly too. SB sets
+//     `redemptionId` and no `command`; this action detects that and relays "spin".
+//     For a reward that should do something else, use a separate action as above.
+//     Kick rewards aren't detected, so they need a separate action too: attached
+//     directly, a viewer's text would hit the rawInput fallback and run as a command.
+//
+// NEVER add a Set Argument for `command` or `value` inside THIS action. The
+// sidecar's status relay and the control page's commands run through here too, so
+// a fixed value rewrites every one of them: `command` = "spin" makes the wheel spin
+// on its own, forever.
 //
 // Commands the sidecar understands (docs/PROTOCOL.md): addEntry, removeEntry,
 // setTag, clearEntries, setEntries, openEntries, closeEntries, entry, spin,
@@ -34,7 +45,7 @@ public class CPHInline
             string command = "";
             string value = "";
 
-            string c, v, raw, cid;
+            string c, v, raw, cid, rid;
             CPH.TryGetArg("rawInput", out raw);
             raw = raw == null ? "" : raw.Trim();
 
@@ -66,6 +77,13 @@ public class CPHInline
                 // Control page / Stream Deck: explicit { command, value } args.
                 command = c.Trim();
                 if (CPH.TryGetArg("value", out v) && v != null) value = v;
+            }
+            else if (CPH.TryGetArg("redemptionId", out rid) && !string.IsNullOrWhiteSpace(rid))
+            {
+                // A Reward Redemption trigger attached directly: a redeem spins.
+                // rawInput is whatever the viewer typed, so it must never reach the
+                // fallback below, where "clearEntries" would run as a command.
+                command = "spin";
             }
             else if (raw.Length > 0)
             {

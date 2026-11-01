@@ -14,8 +14,8 @@
 //             action needed.
 //   inbound   subscribes to General.Custom and consumes
 //             { type:'fortuna:command', command, value, user?, userId? }
-//             broadcasts emitted by the control page and chat triggers via the
-//             "Fortuna Command" action.
+//             broadcasts emitted by the control page, chat triggers and reward
+//             redemptions via the "Fortuna Command" action.
 //
 // Commands: addEntry, removeEntry, setTag, clearEntries, setEntries,
 //           openEntries, closeEntries, entry, spin, removeDrawn, setSettings,

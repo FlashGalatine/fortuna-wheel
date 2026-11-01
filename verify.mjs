@@ -7,7 +7,8 @@
 //   3. Mock HTTP maps.
 //   4. Sidecar E2E: the REAL fortuna-sidecar.mjs runs against the mock —
 //      entry CRUD, chat !entry dedupe + limits + auto-close, spin lifecycle
-//      (spinning → revealed), removeOnDraw / removeDrawn, restart persistence.
+//      (spinning → revealed), channel point redeems, removeOnDraw / removeDrawn,
+//      restart persistence.
 //
 // Uses off-default ports (HTTP 7478 / WS 8084 / guard 7494) so it can run next
 // to a live Streamer.bot or sidecar. Run: npm run verify
@@ -395,6 +396,46 @@ async function testSidecar() {
     JSON.stringify(uWheelChat?.entries.map((e) => e.label)));
   cmd('removeEntry', 'Run it back');
   await since(mark() - 1, (d) => isUpdate(d) && !d.entries.some((e) => e.label === 'Run it back'));
+
+  // ── Channel point redeems ──
+  // A Reward Redemption trigger attached straight onto the action, as SB fires
+  // it: the reward args and NO `command`. rawInput is whatever the viewer typed.
+  const redeem = (rawInput, extra) => client.ws.send(JSON.stringify({
+    request: 'DoAction', id: 'r', action: { name: 'Fortuna Command' },
+    args: {
+      redemptionId: 'rd-1', rewardId: 'rw-1', rewardName: 'Spin the wheel', rewardCost: 100,
+      rawInput, user: 'redeemer', userName: 'redeemer', userId: 'u200', ...(extra || {}),
+    },
+  }));
+  const entriesBeforeRedeem = client.events.filter(isUpdate).pop().entries.length;
+
+  const atRedeem = mark();
+  redeem('');
+  const uRedeem = await since(atRedeem, (d) => isUpdate(d) && d.spin?.state === 'spinning');
+  check('sidecar: reward redemption spins the wheel', !!uRedeem, 'no spinning update');
+  await since(atRedeem, (d) => isUpdate(d) && d.spin?.state === 'revealed' && d.spin.spinId === uRedeem?.spin.spinId);
+
+  // A reward that asks for text: what the viewer typed must not run as a command.
+  const atTyped = mark();
+  redeem('clearEntries');
+  const uTyped = await since(atTyped, (d) => isUpdate(d) && d.spin?.state === 'spinning');
+  check('sidecar: redeem text never runs as a command',
+    uTyped?.entries.length === entriesBeforeRedeem, `${uTyped?.entries.length} of ${entriesBeforeRedeem} entries`);
+  await since(atTyped, (d) => isUpdate(d) && d.spin?.state === 'revealed' && d.spin.spinId === uTyped?.spin.spinId);
+
+  // A separate action sets its own `command` before Run Action; it beats the
+  // redeem default, so a reward can mean something other than spin.
+  const atRedeemOpen = mark();
+  cmd('openEntries', JSON.stringify({ maxEntries: 10, windowSec: 0 }));
+  await since(atRedeemOpen, (d) => isUpdate(d) && d.entryMode.open);
+  const atWrapper = mark();
+  redeem('', { command: 'entry' });
+  const uWrapper = await since(atWrapper, (d) => isUpdate(d) && d.entries.some((e) => e.userId === 'u200'));
+  check('sidecar: a separate action\'s command beats the redeem default', !!uWrapper, 'redeemer never entered');
+  const atRedeemCleanup = mark();
+  cmd('closeEntries');
+  cmd('clearEntries', 'chat');
+  await since(atRedeemCleanup, (d) => isUpdate(d) && !d.entryMode.open && !d.entries.some((e) => e.userId === 'u200'));
 
   // setSettings batch.
   cmd('setSettings', JSON.stringify({ removeOnDraw: true, defaultChatTag: 'neutral' }));

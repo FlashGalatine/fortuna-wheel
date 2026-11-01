@@ -9,7 +9,7 @@ each payload as a same-named window `CustomEvent` (detail = the payload object).
 | Action (exact name) | Role |
 |---|---|
 | `Fortuna Push` | Called by the sidecar with a `fortunaPayload` arg → persists it to the SB global `fortuna.payload` and broadcasts it. Called by panel-core with **no** arg on connect → re-broadcasts the persisted payload (the sync-on-connect replay SB doesn't have natively). |
-| `Fortuna Command` | Relay: DoAction args `{command, value}` → re-broadcasts `{type:"fortuna:command", command, value, user?, userId?}`. WS clients can't broadcast to each other, so every control surface rides this. Chat Command triggers attach directly: SB sets its own `command` (`!entry`) + `commandId`, which the action detects and maps — `!entry` → `entry`, `!wheel <cmd> [value…]` → first word of `rawInput` = command, rest = value. `user`/`userId` are relayed automatically. |
+| `Fortuna Command` | Relay: DoAction args `{command, value}` → re-broadcasts `{type:"fortuna:command", command, value, user?, userId?}`. WS clients can't broadcast to each other, so every control surface rides this. Chat Command triggers attach directly: SB sets its own `command` (`!entry`) + `commandId`, which the action detects and maps — `!entry` → `entry`, `!wheel <cmd> [value…]` → first word of `rawInput` = command, rest = value. `user`/`userId` are relayed automatically. A Twitch Reward Redemption trigger attaches directly too: `redemptionId` with no `command` → `spin`, and the viewer's `rawInput` is never relayed. A `command` set by a separate action (Set Argument, then Run Action) wins over that default. Kick rewards aren't detected, so they need a separate action. Never Set Argument `command` or `value` inside this action: the sidecar's `__status` relay and the control page's commands ride it too, so a fixed value rewrites them. |
 
 ## `fortuna:update` — the persisted wheel state
 
@@ -91,7 +91,7 @@ Commands the sidecar understands (`value` is a string; JSON where noted):
 | `openEntries` | JSON `{maxEntries?, windowSec?}` | control page / `!wheel openEntries` |
 | `closeEntries` | — | control page / `!wheel closeEntries` |
 | `entry` | — (label = the chatter's name; deduped by `userId`) | chat `!entry` |
-| `spin` | optional JSON `{removeAfter?: bool}` | control page |
+| `spin` | optional JSON `{removeAfter?: bool}` | control page / `!wheel spin` / Reward Redemption trigger |
 | `removeDrawn` | — removes the last revealed spin's entry | control page |
 | `setSettings` | JSON `{removeOnDraw?, defaultChatTag?}` — batched | control page |
 | `status` | — request a `fortuna:status` snapshot | any |

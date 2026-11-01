@@ -206,10 +206,10 @@ wss.on('connection', (ws) => {
       } else if (name === 'Fortuna Command') {
         let command = String(m.args?.command ?? '');
         let value = m.args?.value == null ? '' : String(m.args.value);
+        const raw = String(m.args?.rawInput ?? '').trim();
         // Chat Command triggers set their own `command` ("!entry") + commandId;
         // mirror fortuna-command.cs's mapping so verify covers the chat path.
         if (m.args?.commandId) {
-          const raw = String(m.args?.rawInput ?? '').trim();
           const chatCmd = command.trim().replace(/^!/, '').toLowerCase();
           if (chatCmd === 'wheel') {
             const sp = raw.indexOf(' ');
@@ -219,6 +219,16 @@ wss.on('connection', (ws) => {
             command = chatCmd;
             value = raw;
           }
+        } else if (!command.trim() && m.args?.redemptionId) {
+          // A Reward Redemption trigger attached directly: a redeem spins, and the
+          // viewer-typed rawInput never reaches the fallback below.
+          command = 'spin';
+          value = '';
+        } else if (!command.trim() && raw) {
+          // The action's bare rawInput fallback: first word = command, rest = value.
+          const sp = raw.indexOf(' ');
+          command = sp < 0 ? raw : raw.slice(0, sp);
+          value = sp < 0 ? '' : raw.slice(sp + 1).trim();
         }
         if (command) {
           stats.commandCount++;

@@ -8,6 +8,35 @@ Nothing was tagged between the initial release and 1.0.6, so that release
 collects every change in between. Commit hashes and landing dates are noted for
 traceability.
 
+## [Unreleased]
+
+### Added
+
+- **Channel point redeems.** A Twitch Reward Redemption trigger can attach
+  straight onto `Fortuna Command`: the action detects `redemptionId` and relays
+  `spin`, with no Set Argument needed. A separate action that sets its own
+  `command` still wins, so a reward can mean something else (`entry`, say). The
+  mock reproduces the trigger shape and `verify` covers it — 53/53. **To upgrade,**
+  paste the new `fortuna-command.cs` into the action and click Compile; on the old
+  code this trigger does nothing, or runs the viewer's text as a command.
+
+### Fixed
+
+- **Viewer text could run as a command.** A Twitch reward that asks for text,
+  attached directly to `Fortuna Command`, fell through to the bare `rawInput`
+  fallback, so a viewer typing `clearEntries` wiped the wheel. Twitch redeems now
+  ignore that text. Kick rewards aren't detected yet and still reach the fallback,
+  so they need a separate action.
+
+### Documentation
+
+- **Self-spinning wheel.** The `fortuna-command.cs` header told Stream Deck setups
+  to add Set Argument "before this one", which reads as inside the action. A
+  fixed `command` there also rewrites Fortuna's own status messages, so the wheel
+  spins on its own and never stops. The header and README now point to a separate
+  action and warn against setting `command` or `value` there.
+- README: channel point setup, and the `verify` check count brought up to date.
+
 ## [1.0.6] — 2026-07-29
 
 ### Fixed
@@ -50,4 +79,5 @@ Initial release — Wheel of Fate randomizer overlay for Streamer.bot.
 
 Verified offline: `verify` 49/49, `verify:render` 11/11.
 
-[1.0.6]: https://github.com/FlashGalatine/fortuna-wheel/compare/7b030f7...main
+[Unreleased]: https://github.com/FlashGalatine/fortuna-wheel/compare/bd40cf7...main
+[1.0.6]: https://github.com/FlashGalatine/fortuna-wheel/compare/7b030f7...bd40cf7
