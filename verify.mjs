@@ -619,6 +619,11 @@ async function testSidecar() {
   const lastUpdate = client.events.filter(isUpdate).pop();
   const entriesBefore = lastUpdate.entries;
   const lastSpinBefore = lastUpdate.spin;
+  // The kill is abrupt and nothing waits for the sidecar's write, so wait for it here. A
+  // write caught part way would fail the checks below on correct code.
+  const isSaved = () => readFile(cfgPath, 'utf-8').then(JSON.parse)
+    .then((saved) => saved.revision === lastUpdate.revision).catch(() => false);
+  for (let i = 0; i < 50 && !(await isSaved()); i++) await sleep(100);
   sidecarProc.kill();
   await sleep(400);
   const atRestart = mark();
