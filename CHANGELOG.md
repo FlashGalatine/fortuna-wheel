@@ -67,6 +67,10 @@ reward does nothing or runs the viewer's text as a command.
   control page then showed a dead sidecar as alive and ran any script in the
   message. `Fortuna Command` now refuses every chat command starting with `__`, and
   the control page shows status fields as text.
+- **A wheel entry could add script to the control page.** A quote in a label ended
+  its `title` attribute on the control page, so on an unrestricted `!wheel`,
+  `!wheel addEntry " onmouseover="...` ran script when the label was hovered. The
+  page now escapes quotes too.
 
 ### Documentation
 

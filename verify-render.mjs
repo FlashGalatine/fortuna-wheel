@@ -152,6 +152,23 @@ try {
     const statusText = await page.locator('#status').textContent();
     check('control: HTML in a status stays text', rendered === 0 && statusText.includes(forged.entryCount), statusText);
     check('control: a status can\'t run script', (await page.evaluate(() => window.__forged ?? null)) === null);
+
+    // A label stays inside its quoted attributes, and reads back unchanged.
+    const quoted = 'Don\'t " onmouseover="window.__label=1';
+    await fetch(`${HTTP}/mock/push`, {
+      method: 'POST',
+      body: JSON.stringify({ ...sample, revision: (sample.revision ?? 0) + 1, entries: [{ id: quoted, label: quoted, tag: 'good', source: 'streamer' }] }),
+    });
+    await page.waitForFunction(() => document.querySelectorAll('#entries .entry').length === 1, null, { timeout: 5000 });
+    const attrs = await page.locator('#entries .entry').evaluate((row) => {
+      const lbl = row.querySelector('.lbl');
+      return {
+        id: row.dataset.id, title: lbl.title, text: lbl.textContent,
+        handlers: [row, ...row.querySelectorAll('*')].flatMap((el) => el.getAttributeNames()).filter((n) => n.startsWith('on')),
+      };
+    });
+    check('control: a quote in a label can\'t add a handler', attrs.handlers.length === 0, JSON.stringify(attrs.handlers));
+    check('control: a quoted label reads back unchanged', attrs.id === quoted && attrs.title === quoted && attrs.text === quoted, JSON.stringify(attrs));
     await page.close();
   }
 } catch (err) {
