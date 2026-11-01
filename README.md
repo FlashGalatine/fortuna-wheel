@@ -147,11 +147,11 @@ launches harmless.
 
 - `npm start` — mock Streamer.bot (HTTP :7474 + WS :8080) with a landing page;
   `/mock/fixture` broadcasts a sample wheel, POST `/mock/push` any payload.
-- `npm run verify` — 125 offline checks: spin math determinism, the real
+- `npm run verify` — 139 offline checks: spin math determinism, the real
   panel-core against the mock (subscribe case, sync replay, serialized queue),
   HTTP maps, the mock's copy of the action's mapping, a real sidecar E2E (entry CRUD,
   `!entry` dedupe/limits, spin lifecycle, channel point redeems, restart
-  persistence), and the real `fortuna-command.cs` against a stub `CPH`. Those last 36
+  persistence), and the real `fortuna-command.cs` against a stub `CPH`. Those last 43
   need the .NET Framework's `csc.exe` and are reported as skipped without it; they
   prove the action's logic, not real Streamer.bot behavior. Uses off-default ports
   (7478/8084/7494) so it runs beside a live SB.

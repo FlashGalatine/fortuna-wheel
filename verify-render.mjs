@@ -137,6 +137,38 @@ try {
     const warnShown = await page.locator('#sidecar-note').isVisible();
     check('control: warns when sidecar is absent', warnShown, String(warnShown));
     await page.screenshot({ path: resolve(__dirname, 'control-render.png') });
+
+    // Status fields are text, whatever reaches the page. Relayed for real, on the
+    // reserved args the sidecar's own status uses.
+    const forged = {
+      entryCount: '<img src=x onerror="window.__forged=1">',
+      chatEntryCount: '<b id="forged-chat">9</b>',
+      entryMode: { open: true, secondsLeft: '<i id="forged-left">1</i>' },
+    };
+    await page.evaluate((v) => window.__FORTUNA_SEND_COMMAND('__status', v), JSON.stringify(forged));
+    await page.waitForFunction(() => document.getElementById('status').textContent.includes('Entries:'), null, { timeout: 5000 });
+    await sleep(500); // a failed image load reports asynchronously
+    const rendered = await page.locator('#status img, #status b#forged-chat, #status i#forged-left').count();
+    const statusText = await page.locator('#status').textContent();
+    check('control: HTML in a status stays text', rendered === 0 && statusText.includes(forged.entryCount), statusText);
+    check('control: a status can\'t run script', (await page.evaluate(() => window.__forged ?? null)) === null);
+
+    // A label stays inside its quoted attributes, and reads back unchanged.
+    const quoted = 'Don\'t " onmouseover="window.__label=1';
+    await fetch(`${HTTP}/mock/push`, {
+      method: 'POST',
+      body: JSON.stringify({ ...sample, revision: (sample.revision ?? 0) + 1, entries: [{ id: quoted, label: quoted, tag: 'good', source: 'streamer' }] }),
+    });
+    await page.waitForFunction(() => document.querySelectorAll('#entries .entry').length === 1, null, { timeout: 5000 });
+    const attrs = await page.locator('#entries .entry').evaluate((row) => {
+      const lbl = row.querySelector('.lbl');
+      return {
+        id: row.dataset.id, title: lbl.title, text: lbl.textContent,
+        handlers: [row, ...row.querySelectorAll('*')].flatMap((el) => el.getAttributeNames()).filter((n) => n.startsWith('on')),
+      };
+    });
+    check('control: a quote in a label can\'t add a handler', attrs.handlers.length === 0, JSON.stringify(attrs.handlers));
+    check('control: a quoted label reads back unchanged', attrs.id === quoted && attrs.title === quoted && attrs.text === quoted, JSON.stringify(attrs));
     await page.close();
   }
 } catch (err) {
