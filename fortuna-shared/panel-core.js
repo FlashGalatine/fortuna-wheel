@@ -170,11 +170,14 @@
     pumpQueue();
     return true;
   };
-  // Shorthand for the common case: a Fortuna Command.
-  window.__FORTUNA_SEND_COMMAND = (command, value) => window.__FORTUNA_DO_ACTION('Fortuna Command', {
-    command: String(command),
-    value: value == null ? '' : String(value),
-  });
+  // Shorthand for the common case: a Fortuna Command. The reserved pair wins in the
+  // C# action, so a Set Argument for `command` inside it can't turn this into a spin;
+  // `command`/`value` keep older actions working.
+  window.__FORTUNA_SEND_COMMAND = (command, value) => {
+    const c = String(command);
+    const v = value == null ? '' : String(value);
+    return window.__FORTUNA_DO_ACTION('Fortuna Command', { command: c, value: v, fortunaCommand: c, fortunaValue: v });
+  };
 
   function init() { setOffline(true); connect(); }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
