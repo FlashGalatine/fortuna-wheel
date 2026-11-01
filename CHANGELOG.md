@@ -25,7 +25,7 @@ reward does nothing or runs the viewer's text as a command.
 - **`verify` runs the real C# action.** It compiles `fortuna-command.cs` with the
   .NET Framework's `csc` against a stub `CPH` (`tools/action-harness.cs`) and
   reports those checks as skipped when `csc` is missing. The same rows also run
-  through the mock's copy of the mapping, so drift on any row fails — 143/143. This
+  through the mock's copy of the mapping, so drift on any row fails — 157/157. This
   proves the action's logic, not real Streamer.bot behavior.
 
 ### Changed
@@ -62,6 +62,15 @@ reward does nothing or runs the viewer's text as a command.
   that sets its own `command` still runs.
 - **A command on cooldown still ran.** A Command Cooldown trigger also sets
   `commandId`, so it was treated as the command itself. It is now ignored.
+- **Chat could forge the sidecar's status.** On an unrestricted `!wheel`, a viewer's
+  `!wheel __status {...}` relayed as the sidecar's reserved status message. The
+  control page then showed a dead sidecar as alive and ran any script in the
+  message. `Fortuna Command` now refuses every chat command starting with `__`, and
+  the control page shows status fields as text.
+- **A wheel entry could add script to the control page.** A quote in a label ended
+  its `title` attribute on the control page, so on an unrestricted `!wheel`,
+  `!wheel addEntry " onmouseover="...` ran script when the label was hovered. The
+  page now escapes quotes too.
 - **One chat message could crash the sidecar.** On an unrestricted `!wheel`,
   `!wheel addEntry {"label":{"toString":1}}` ended the process, because `String()` and
   `Number()` throw on that object, and the wheel stayed down until restarted.
@@ -79,13 +88,15 @@ reward does nothing or runs the viewer's text as a command.
 
 - README: channel point setup, and the `verify` check count brought up to date.
 
-Verified offline: `verify` 143/143. Verified live on Streamer.bot 1.0.7, on pastes
+Verified offline: `verify` 157/157. Verified live on Streamer.bot 1.0.7, on pastes
 of the action from before the Command Cooldown check: it compiles; simulated redeem,
 chat and control page shapes behave as designed over DoAction; a real chat trigger
 relays correctly and its `__source` reads as the event type's name; and a real Set
 Argument `command` = `spin` left the wheel idle with no loop. Not yet verified live:
 the Command Cooldown check, a real channel point redeem, approval or rejection, the
-`__source` values they carry, and the sidecar crash fix.
+`__source` values they carry, and the sidecar crash fix. The `__` refusal was checked
+in the compiled action against a stub `CPH` and in the mock, and the escaping in a
+browser against the mock. Neither was checked on Streamer.bot.
 
 ## [1.0.6] — 2026-07-29
 
