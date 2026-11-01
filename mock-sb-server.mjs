@@ -234,7 +234,8 @@ wss.on('connection', (ws) => {
           value = args.fortunaValue == null ? '' : String(args.fortunaValue);
         } else if (String(args.commandId ?? '').trim()) {
           // Chat Command triggers set their own `command` ("!entry") + commandId.
-          const chatCmd = command.replace(/^!+/, '').toLowerCase();
+          // Command Cooldown sets the same two, but a cooldown must not run the command.
+          const chatCmd = String(args.__source ?? '') === 'CommandCooldown' ? '' : command.replace(/^!+/, '').toLowerCase();
           if (chatCmd === 'wheel') {
             const raw = String(args.rawInput ?? '').trim();
             const sp = raw.indexOf(' ');

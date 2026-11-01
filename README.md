@@ -82,11 +82,12 @@ sub-actions needed (the action detects them itself):
   command, and this one can wipe the wheel.
 - **Twitch → Channel Reward → Reward Redemption** — pick your reward; every
   redeem spins the wheel. Anything the viewer types is ignored. Use this trigger,
-  not *Reward Redemption Updated*, which fires when you approve or reject a redeem;
-  Fortuna ignores those. Test with a real redeem, because Streamer.bot's Test
-  Trigger may not set the arguments Fortuna looks for. On Streamer.bot 1.0.7, Test
-  Trigger on *Reward Redemption Updated* with no reward picked crashed Streamer.bot
-  itself, so avoid it.
+  not *Reward Redemption Updated*, which fires when you approve or reject a redeem.
+  Attached here, Fortuna ignores it; a separate action that sets its own `command`
+  still runs on every approve and reject. Test with a real redeem, because
+  Streamer.bot's Test Trigger may not set the arguments Fortuna looks for. On
+  Streamer.bot 1.0.7, Test Trigger on *Reward Redemption Updated* with no reward
+  picked crashed Streamer.bot itself, so avoid it.
 
 Kick rewards aren't detected yet, so attached here they do nothing. Use a separate
 action, as described below.
@@ -146,11 +147,11 @@ launches harmless.
 
 - `npm start` — mock Streamer.bot (HTTP :7474 + WS :8080) with a landing page;
   `/mock/fixture` broadcasts a sample wheel, POST `/mock/push` any payload.
-- `npm run verify` — 117 offline checks: spin math determinism, the real
+- `npm run verify` — 125 offline checks: spin math determinism, the real
   panel-core against the mock (subscribe case, sync replay, serialized queue),
   HTTP maps, the mock's copy of the action's mapping, a real sidecar E2E (entry CRUD,
   `!entry` dedupe/limits, spin lifecycle, channel point redeems, restart
-  persistence), and the real `fortuna-command.cs` against a stub `CPH`. Those last 32
+  persistence), and the real `fortuna-command.cs` against a stub `CPH`. Those last 36
   need the .NET Framework's `csc.exe` and are reported as skipped without it; they
   prove the action's logic, not real Streamer.bot behavior. Uses off-default ports
   (7478/8084/7494) so it runs beside a live SB.

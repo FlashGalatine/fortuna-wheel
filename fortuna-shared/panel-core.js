@@ -172,7 +172,8 @@
   };
   // Shorthand for the common case: a Fortuna Command. The reserved pair wins in the
   // C# action, so a Set Argument for `command` inside it can't turn this into a spin;
-  // `command`/`value` keep older actions working.
+  // `command`/`value` keep older actions working, at the cost of sending the value
+  // twice: drop them once those actions are unsupported.
   window.__FORTUNA_SEND_COMMAND = (command, value) => {
     const c = String(command);
     const v = value == null ? '' : String(value);

@@ -406,10 +406,7 @@ async function testSidecar() {
   // it: the reward args and NO `command`. rawInput is whatever the viewer typed.
   const redeem = (rawInput, extra) => client.ws.send(JSON.stringify({
     request: 'DoAction', id: 'r', action: { name: 'Fortuna Command' },
-    args: {
-      redemptionId: 'rd-1', rewardId: 'rw-1', rewardName: 'Spin the wheel', rewardCost: 100,
-      rawInput, user: 'redeemer', userName: 'redeemer', userId: 'u200', ...(extra || {}),
-    },
+    args: { ...REDEEM, rawInput, ...(extra || {}) },
   }));
   const entriesBeforeRedeem = client.events.filter(isUpdate).pop().entries.length;
 
@@ -443,13 +440,18 @@ async function testSidecar() {
 
   // A Set Argument for `command` inside the action must not turn Fortuna's own
   // traffic into spins: the real panel-core asks for status and the real sidecar
-  // answers, both under the hijack. Cleared before checking so a regression's
-  // flood stays one red check.
+  // answers, both under the hijack. Cleared before checking, to end a regression's
+  // flood. waitForProof waits on the round trip itself, up to a bound, so a slow
+  // machine can't fail these.
   const setArgs = (args) => fetch(`${HTTP}/mock/set-args`, { method: 'POST', body: JSON.stringify(args) });
+  const waitForProof = async (at, label) => {
+    await since(at, (d) => isUpdate(d) && d.entries.some((e) => e.label === label), 1500);
+    await since(at, (d) => isStatus(d) && d.value.startsWith('{'), 1500);
+  };
   const atHijack = mark();
   await setArgs({ command: 'spin', value: 'x' });
   globalThis.window.__FORTUNA_SEND_COMMAND('addEntry', JSON.stringify({ label: 'Hijack proof', tag: 'good' }));
-  await sleep(400);
+  await waitForProof(atHijack, 'Hijack proof');
   await setArgs({});
   const hijacked = client.events.slice(atHijack);
   check('sidecar: Set Argument command=spin can\'t rewrite Fortuna\'s own traffic',
@@ -466,7 +468,7 @@ async function testSidecar() {
   const atOldAction = mark();
   await setArgs({ fortunaCommand: '', fortunaValue: '' });
   globalThis.window.__FORTUNA_SEND_COMMAND('addEntry', JSON.stringify({ label: 'Old action proof', tag: 'good' }));
-  await sleep(400);
+  await waitForProof(atOldAction, 'Old action proof');
   await setArgs({});
   const onOldAction = client.events.slice(atOldAction);
   check('sidecar: page and sidecar still work with an older action',
@@ -512,6 +514,8 @@ async function testSidecar() {
 // ── 5. The real C# action ─────────────────────────────────────────────────────
 
 // Hand-written call shapes. want = the one command relayed; null = nothing relayed.
+// ignored = dropped on purpose, so Execute still returns true. Any other null row
+// found no command, and returns false.
 const REDEEM = { redemptionId: 'rd-1', rewardId: 'rw-1', rewardName: 'Spin the wheel', user: 'redeemer', userId: 'u200' };
 const ACTION_ROWS = [
   { name: 'control page command', args: { command: 'status', value: '', fortunaCommand: 'status', fortunaValue: '' }, want: { command: 'status' } },
@@ -528,12 +532,12 @@ const ACTION_ROWS = [
   { name: 'redeem text never runs as a command', args: { ...REDEEM, rawInput: 'clearEntries' }, want: { command: 'spin' } },
   { name: 'redeem with another status still spins', args: { ...REDEEM, rewardStatus: 'unfulfilled' }, want: { command: 'spin' } },
   { name: 'a separate action\'s command beats the redeem default', args: { ...REDEEM, command: 'entry' }, want: { command: 'entry', user: 'redeemer' } },
-  { name: 'approving a redeem doesn\'t spin', args: { ...REDEEM, rewardStatus: ' fulfilled ' }, want: null },
-  { name: 'rejecting a redeem doesn\'t spin', args: { ...REDEEM, rewardStatus: 'Canceled' }, want: null },
+  { name: 'approving a redeem doesn\'t spin', args: { ...REDEEM, rewardStatus: ' fulfilled ' }, want: null, ignored: true },
+  { name: 'rejecting a redeem doesn\'t spin', args: { ...REDEEM, rewardStatus: 'Canceled' }, want: null, ignored: true },
   { name: 'a Skip Queue redeem marked fulfilled still spins', args: { ...REDEEM, __source: 'TwitchRewardRedemption', rewardStatus: 'fulfilled' }, want: { command: 'spin' } },
-  { name: 'Reward Redemption Updated is ignored', args: { ...REDEEM, __source: 'TwitchRewardRedemptionUpdated' }, want: null },
-  { name: 'Reward Redemption Updated is ignored with any status', args: { ...REDEEM, __source: 'TwitchRewardRedemptionUpdated', rewardStatus: 'unfulfilled' }, want: null },
-  { name: 'a final status is ignored under another source', args: { ...REDEEM, __source: 'SomethingElse', rewardStatus: 'canceled' }, want: null },
+  { name: 'Reward Redemption Updated is ignored', args: { ...REDEEM, __source: 'TwitchRewardRedemptionUpdated' }, want: null, ignored: true },
+  { name: 'Reward Redemption Updated is ignored with any status', args: { ...REDEEM, __source: 'TwitchRewardRedemptionUpdated', rewardStatus: 'unfulfilled' }, want: null, ignored: true },
+  { name: 'a final status is ignored under another source', args: { ...REDEEM, __source: 'SomethingElse', rewardStatus: 'canceled' }, want: null, ignored: true },
   { name: 'a blank command relays nothing', args: { command: '   ' }, want: null },
   { name: 'a blank redemptionId relays nothing', args: { redemptionId: '  ', rawInput: 'spin' }, want: null },
   { name: 'a redeem with a null __source spins', args: { ...REDEEM, __source: null }, want: { command: 'spin' } },
@@ -541,6 +545,10 @@ const ACTION_ROWS = [
   { name: 'every leading ! is stripped from a chat command', args: { command: '!!entry', commandId: 'c1' }, want: { command: 'entry' } },
   { name: 'a blank reserved command falls through', args: { fortunaCommand: '  ', command: 'status' }, want: { command: 'status' } },
   { name: 'a blank user isn\'t relayed', args: { command: 'status', user: ' ', userId: '' }, want: { command: 'status', user: null, userId: null } },
+  { name: 'a real Guid commandId reads as a chat trigger', args: { command: '!entry', commandId: '11111111-2222-3333-4444-555555555555', user: 'chatter' }, want: { command: 'entry', user: 'chatter' } },
+  { name: 'a real Command Triggered run isn\'t taken for a cooldown', args: { __source: 'CommandTriggered', command: '!entry', commandId: '11111111-2222-3333-4444-555555555555', user: 'chatter' }, want: { command: 'entry', user: 'chatter' } },
+  { name: 'Command Cooldown doesn\'t run the command', args: { __source: 'CommandCooldown', command: '!spin', commandId: 'c3', rawInput: '' }, want: null, ignored: true },
+  { name: 'a separate action on Reward Redemption Updated keeps its command', args: { ...REDEEM, __source: 'TwitchRewardRedemptionUpdated', command: 'entry' }, want: { command: 'entry', user: 'redeemer' } },
   { name: 'Kick reward text never runs as a command', args: { rawInput: 'clearEntries', 'reward.id': 'k1' }, want: null },
   { name: 'other trigger text never runs as a command', args: { rawInput: 'clearEntries', message: 'clearEntries' }, want: null },
   { name: 'no arguments relays nothing', args: {}, want: null },
@@ -599,7 +607,9 @@ function testAction() {
 
     ACTION_ROWS.forEach((row, i) => {
       const relayed = results[i].broadcasts.map((b) => JSON.parse(b));
-      check(`action: ${row.name}`, rowMatches(row, relayed), results[i].broadcasts.join(' | ') || '(nothing relayed)');
+      const wantReturned = row.want !== null || row.ignored === true;
+      check(`action: ${row.name}`, rowMatches(row, relayed) && results[i].returned === wantReturned,
+        `returned ${results[i].returned}: ${results[i].broadcasts.join(' | ') || '(nothing relayed)'}`);
     });
   } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* AV can hold the exe briefly */ }

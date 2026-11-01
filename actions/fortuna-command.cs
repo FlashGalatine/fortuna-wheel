@@ -15,7 +15,9 @@
 //     e.g. "!entry") + `commandId`; this action detects that and maps:
 //       "!entry"                → command "entry" (user/userId relayed for dedupe)
 //       "!wheel <cmd> [value…]" → first word of rawInput = command, rest = value
-//     Any other chat command "!foo" relays as command "foo"; text after it is dropped.
+//     Any other chat command "!foo" relays as lowercase "foo" with the text after it
+//     dropped, so only entry, spin and status work this way: use !wheel for the rest.
+//     A Command Cooldown trigger is ignored: a command on cooldown doesn't run.
 //   • Twitch Reward Redemption triggers — attach them directly too. SB sets
 //     `redemptionId` and no `command`; this action detects that and relays "spin".
 //     For a reward that should do something else, use a separate action as above.
@@ -51,6 +53,10 @@ public class CPHInline
 
             string c, v, cid, rid, status;
 
+            // Which trigger fired. Absent on a DoAction.
+            object src;
+            string source = CPH.TryGetArg("__source", out src) && src != null ? src.ToString() : "";
+
             // Fortuna's own traffic (sidecar status relay, control page) repeats its
             // command in reserved args, so a Set Argument for `command` or `value` in
             // this action can't rewrite it. Never fall back to `value` here.
@@ -64,7 +70,13 @@ public class CPHInline
                 // A chat Command trigger sets ITS OWN `command` argument (the matched
                 // chat command, e.g. "!entry") plus a `commandId` — which a control-page
                 // DoAction never carries. Without this branch the trigger's command
-                // shadows ours and the sidecar sees unknown "!entry"/"!wheel".
+                // shadows ours and the sidecar sees unknown "!entry"/"!wheel". Command
+                // Cooldown sets the same two, but a cooldown must not run the command.
+                if (source == "CommandCooldown")
+                {
+                    CPH.LogInfo("[Fortuna Command] command on cooldown, ignored");
+                    return true;
+                }
                 CPH.TryGetArg("command", out c);
                 string chatCmd = (c ?? "").Trim().TrimStart('!').ToLowerInvariant();
                 if (chatCmd == "wheel")
@@ -98,8 +110,6 @@ public class CPHInline
                 // Redemption Updated also sets redemptionId when a redeem is approved
                 // or rejected, and that must not spin the wheel again. `__source` names
                 // the trigger; a final rewardStatus is the fallback for any other source.
-                object src;
-                string source = CPH.TryGetArg("__source", out src) && src != null ? src.ToString() : "";
                 CPH.TryGetArg("rewardStatus", out status);
                 status = (status ?? "").Trim().ToLowerInvariant();
                 if (source == "TwitchRewardRedemptionUpdated"
@@ -113,7 +123,7 @@ public class CPHInline
 
             if (string.IsNullOrWhiteSpace(command))
             {
-                CPH.LogWarn("[Fortuna Command] no command to relay. A reward's Test Trigger may not set redemptionId: test with a real redeem. Kick rewards need a separate action.");
+                CPH.LogWarn("[Fortuna Command] no command to relay. Likely causes: a bare !wheel; a reward's Test Trigger, which may not set redemptionId (test with a real redeem); a Kick reward, which needs a separate action.");
                 return false;
             }
 

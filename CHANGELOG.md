@@ -25,7 +25,7 @@ reward does nothing or runs the viewer's text as a command.
 - **`verify` runs the real C# action.** It compiles `fortuna-command.cs` with the
   .NET Framework's `csc` against a stub `CPH` (`tools/action-harness.cs`) and
   reports those checks as skipped when `csc` is missing. The same rows also run
-  through the mock's copy of the mapping, so drift on any row fails — 117/117. This
+  through the mock's copy of the mapping, so drift on any row fails — 125/125. This
   proves the action's logic, not real Streamer.bot behavior.
 
 ### Changed
@@ -56,21 +56,24 @@ reward does nothing or runs the viewer's text as a command.
   A Set Argument for `command` there still rewrites every trigger and Stream Deck
   call, so the header and README point to a separate action and warn against it.
 - **Approving or rejecting a redeem could spin the wheel.** Reward Redemption
-  Updated also sets `redemptionId`. It is now ignored, identified by `__source`,
-  with a `rewardStatus` of `fulfilled` or `canceled` as the fallback for any source
-  other than the plain Reward Redemption trigger.
+  Updated also sets `redemptionId`. Attached directly, it is now ignored, identified
+  by `__source`, with a `rewardStatus` of `fulfilled` or `canceled` as the fallback
+  for any source other than the plain Reward Redemption trigger. A separate action
+  that sets its own `command` still runs.
+- **A command on cooldown still ran.** A Command Cooldown trigger also sets
+  `commandId`, so it was treated as the command itself. It is now ignored.
 
 ### Documentation
 
 - README: channel point setup, and the `verify` check count brought up to date.
 
-Verified offline: `verify` 117/117. Verified live on Streamer.bot 1.0.7: this action
-compiles; simulated redeem, chat and control page shapes behave as designed over
-DoAction; a real chat trigger relays correctly and its `__source` reads as the event
-type's name. On the previous paste of the action, whose reserved-argument branch is
-unchanged, a real Set Argument `command` = `spin` left the wheel idle with no loop.
-Not yet verified live: a real channel point redeem, approval or rejection, and the
-`__source` values they carry.
+Verified offline: `verify` 125/125. Verified live on Streamer.bot 1.0.7, on pastes
+of the action from before the Command Cooldown check: it compiles; simulated redeem,
+chat and control page shapes behave as designed over DoAction; a real chat trigger
+relays correctly and its `__source` reads as the event type's name; and a real Set
+Argument `command` = `spin` left the wheel idle with no loop. Not yet verified live:
+the Command Cooldown check, a real channel point redeem, approval or rejection, and
+the `__source` values they carry.
 
 ## [1.0.6] — 2026-07-29
 

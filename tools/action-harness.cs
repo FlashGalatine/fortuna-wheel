@@ -12,6 +12,10 @@ using System.IO;
 using System.Text;
 using System.Web.Script.Serialization;
 
+// Real triggers pass __source as this enum, and commandId as a Guid (seen on
+// Streamer.bot 1.0.7). JSON can't carry either, so Main converts them per row.
+public enum EventType { CommandCooldown, CommandTriggered, SomethingElse, TwitchRewardRedemption, TwitchRewardRedemptionUpdated }
+
 public static class CPH
 {
     public static Dictionary<string, object> Args;
@@ -23,7 +27,8 @@ public static class CPH
     {
         object o;
         if (!Args.TryGetValue(name, out o)) { value = default(T); return false; }
-        value = (T)Convert.ChangeType(o, typeof(T));
+        // A string read of a Guid works on real Streamer.bot; ChangeType would throw.
+        value = typeof(T) == typeof(string) ? (T)(object)(o == null ? null : o.ToString()) : (T)Convert.ChangeType(o, typeof(T));
         return true;
     }
 
@@ -44,6 +49,11 @@ public static class Harness
         var results = new List<object>();
         foreach (var args in rows)
         {
+            object o;
+            Guid id;
+            if (args.TryGetValue("__source", out o) && o is string) args["__source"] = Enum.Parse(typeof(EventType), (string)o);
+            if (args.TryGetValue("commandId", out o) && o is string && Guid.TryParse((string)o, out id)) args["commandId"] = id;
+
             CPH.Args = args;
             CPH.Broadcasts = new List<string>();
             bool returned = new CPHInline().Execute();
