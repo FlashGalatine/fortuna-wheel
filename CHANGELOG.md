@@ -10,11 +10,30 @@ traceability.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A burst of commands or a stop during a save could wipe the wheel.** Every change
+  started its own write to `config.json`, with nothing waiting for the one before. Two
+  close together could leave a corrupt file, and stopping the sidecar during a stalled
+  write left an empty one. The next start logged `Bad config JSON` and brought up a blank
+  wheel, and the next change overwrote what was left. Saves now run one at a time, a
+  burst shares one write, and each goes through `config.json.tmp` and a rename, so a stop
+  at any moment leaves the last whole save. Ctrl+C waits up to 2 seconds for a running
+  save. Windows refuses the rename while another program has the file open, even just to
+  read it, so a refused save retries by itself and shows a note on the control page if
+  it lasts. A `config.json` that still won't parse, from a hand edit or an older version,
+  is copied to `config.json.bad` first, with a note on the control page. A file another
+  program holds at startup is now waited for: the sidecar used to start blank, and its
+  next change overwrote the file.
+
 ### Documentation
 
 - Setup and update steps said to click Compile, which only tests the code. A reader
   who stopped there kept the old action. They now say Save and Compile, including in
   the 1.0.12 notes below.
+
+Verified offline: `verify` 185/185, with its three held-file checks on Windows only
+(reported as skipped elsewhere). Not run on a live Streamer.bot.
 
 ## [1.0.12] — 2026-11-01
 
