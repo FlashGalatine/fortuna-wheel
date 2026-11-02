@@ -165,6 +165,12 @@ refusal can replace a refusal's note, but not a thrown error's.
 `lastErrorAt` is when it happened (an ISO time, `null` with no note). The control
 page shows it, so an old note reads as a past event and not a current fault.
 
+The text can also carry two standing notes about `config.json`, ahead of the latest
+failure and joined with ` · `: one about how it loaded, which lasts until a restart,
+and one while saves keep failing, which ends when a save lands. No command clears
+either. `lastErrorAt` dates only the failure at the end of the text, and is `null`
+when the text holds only standing notes.
+
 ## `fortuna:error`
 
 `{ "type": "fortuna:error", "message": "…" }` — broadcast by the C# actions'
