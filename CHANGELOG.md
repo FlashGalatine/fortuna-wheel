@@ -90,15 +90,31 @@ reward does nothing or runs the viewer's text as a command.
 
 - README: channel point setup, and the `verify` check count brought up to date.
 
-Verified offline: `verify` 167/167. Verified live on Streamer.bot 1.0.7, on pastes
-of the action from before the Command Cooldown check: it compiles; simulated redeem,
-chat and control page shapes behave as designed over DoAction; a real chat trigger
-relays correctly and its `__source` reads as the event type's name; and a real Set
-Argument `command` = `spin` left the wheel idle with no loop. Not yet verified live:
-the Command Cooldown check, a real channel point redeem, approval or rejection, the
-`__source` values they carry, and the sidecar crash fix. The `__` refusal was checked
-in the compiled action against a stub `CPH` and in the mock, and the escaping in a
-browser against the mock. Neither was checked on Streamer.bot.
+Verified offline: `verify` 167/167.
+
+Verified live on Streamer.bot 1.0.7 and a Twitch Affiliate channel, with the action
+and sidecar at `bf7b5de`:
+
+- A real redeem spins once, and so does a Skip Queue reward. Approving or rejecting
+  a redeem is ignored, and the log shows `__source` as
+  `TwitchRewardRedemptionUpdated` with `fulfilled` or `canceled`.
+- A command on cooldown is ignored. Streamer.bot exempts the broadcaster account from
+  cooldowns, so testing this takes a second account.
+- `!wheel __status {}` from chat is refused.
+- The `addEntry` crash message from chat leaves the sidecar running with no entry
+  added.
+- `!entry` joins an open drawing.
+
+Verified live on earlier pastes of the action: it compiles; simulated redeem, chat
+and control page shapes behave as designed over DoAction; a real chat trigger's
+`__source` reads as the event type's name; and a real Set Argument `command` = `spin`
+left the wheel idle with no loop.
+
+Not yet verified live: a redeem during a broadcast, the other crash paths
+(`setEntries`, `setTag`, `openEntries`), and Kick. The control page escaping was
+checked in a browser against the mock, not on Streamer.bot. A U+FEFF before `__status`
+didn't reach Streamer.bot from Twitch chat, so it only ran through DoAction in the chat
+trigger's shape, where it stayed an unknown command.
 
 ## [1.0.6] — 2026-07-29
 
