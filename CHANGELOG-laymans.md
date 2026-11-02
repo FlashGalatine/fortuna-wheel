@@ -43,7 +43,7 @@ Even with these fixes, anyone who can use `!wheel` can still clear the wheel, so
 
 1. Get the new files (`git pull`, or extract the new ZIP over your folder).
 2. Stop the helper program (the sidecar) by closing its window. If the `Fortuna Sidecar Start` action launched it, it has no window, so end its `node.exe` in Task Manager. Otherwise the old copy keeps running and the new one exits, so the fixes in it don't take effect.
-3. Paste the new `fortuna-command.cs` into the `Fortuna Command` action and click Compile.
+3. Paste the new `fortuna-command.cs` into the `Fortuna Command` action and click Save and Compile. Compile alone only tests the code and doesn't save it.
 4. If you added a Set Argument for `command` or `value` inside `Fortuna Command`, delete it and use a separate action that runs `Fortuna Command`. Updating doesn't remove it.
 5. Start the sidecar again, then reload the control page and any OBS docks.
 
