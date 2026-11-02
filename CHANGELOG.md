@@ -45,7 +45,7 @@ traceability.
   who stopped there kept the old action. They now say Save and Compile, including in
   the 1.0.12 notes below.
 
-Verified offline: `verify` 209/209. None of these fixes has run on a live Streamer.bot.
+Verified offline: `verify` 230/230. None of these fixes has run on a live Streamer.bot.
 
 ## [1.0.12] — 2026-11-01
 

@@ -154,7 +154,10 @@ async function testPanelCore() {
     body: { classList: { toggle: () => {} } },
   };
   globalThis.location = { search: '' };
-  globalThis.WebSocket = WebSocket;
+  const wire = []; // every frame panel-core puts on its socket
+  globalThis.WebSocket = class extends WebSocket {
+    send(data) { wire.push(data); super.send(data); }
+  };
 
   await import('./fortuna-shared/panel-core.js');
 
@@ -174,11 +177,13 @@ async function testPanelCore() {
     live ? String(live.detail.entries.length) : 'none');
   check('panel-core: tags travel in payload', live && live.detail.entries[0].tag === 'bad');
 
-  // Serialized command queue: two rapid sends must BOTH arrive (the second waits
-  // for the first's ack instead of overlapping on the wire).
+  // Serialized command queue: two rapid sends must BOTH arrive, and the second waits
+  // for the first's ack instead of overlapping on the wire. No ack can land in this tick.
   const before = (await (await fetch(`${HTTP}/mock/stats`)).json()).commandCount;
+  const framesBefore = wire.length;
   globalThis.window.__FORTUNA_SEND_COMMAND('status');
   globalThis.window.__FORTUNA_SEND_COMMAND('status');
+  check('panel-core: a second command waits for the first\'s ack', wire.length - framesBefore === 1, `${wire.length - framesBefore} frames at once`);
   await sleep(600);
   const after = (await (await fetch(`${HTTP}/mock/stats`)).json()).commandCount;
   check('panel-core: serialized queue delivers both commands', after - before === 2, `${before} → ${after}`);
@@ -296,6 +301,12 @@ async function testSidecar() {
   cmd('setTag', JSON.stringify({ id: u3.entries[2].id, tag: 'good' }));
   const u4 = await client.next((d) => isUpdate(d) && d.entries[2]?.tag === 'good');
   check('sidecar: setTag by id', u4.entries[2].tag === 'good');
+
+  // setTag by label (case-insensitive).
+  const atTagLabel = mark();
+  cmd('setTag', JSON.stringify({ label: 'wildcard ROUND', tag: 'bad' }));
+  const u4Label = await since(atTagLabel, isUpdate);
+  check('sidecar: setTag by label', u4Label?.entries[2].tag === 'bad', JSON.stringify(u4Label?.entries[2] ?? null));
 
   // removeEntry by label (case-insensitive).
   cmd('removeEntry', 'wildcard round');
@@ -502,6 +513,27 @@ async function testSidecar() {
   check('sidecar: setSettings batch', sSet.settings.removeOnDraw === true && sSet.settings.defaultChatTag === 'neutral',
     JSON.stringify(sSet.settings));
 
+  // The new default tag reaches a viewer's entry.
+  const atTagged = mark();
+  cmd('openEntries', '{"maxEntries":10,"windowSec":0}');
+  cmd('entry', '', { user: 'tagged_viewer', userId: 'u321' });
+  const uTagged = await since(atTagged, (d) => isUpdate(d) && d.entries.some((e) => e.userId === 'u321'));
+  check('sidecar: a chat entry takes the default tag setSettings chose', uTagged?.entries.find((e) => e.userId === 'u321').tag === 'neutral', JSON.stringify(uTagged?.entries ?? null));
+  const atTaggedCleanup = mark();
+  cmd('closeEntries');
+  cmd('removeEntry', 'tagged_viewer');
+  await since(atTaggedCleanup, (d) => isUpdate(d) && !d.entryMode.open && !d.entries.some((e) => e.userId === 'u321'));
+
+  // The elimination setting: no per-spin option, and the winner still leaves the wheel. The
+  // earlier draws can leave one entry here, so add one: the checks below need a wheel left.
+  const atFodder = mark();
+  cmd('addEntry', 'Elimination fodder');
+  const uFodder = await since(atFodder, (d) => isUpdate(d) && d.entries.some((e) => e.label === 'Elimination fodder'));
+  const { revealed: uOnDraw } = await drawSpin();
+  check('sidecar: removeOnDraw removes the winner with no per-spin option',
+    !!uOnDraw && uOnDraw.entries.length === uFodder.entries.length - 1 && !uOnDraw.entries.some((e) => e.id === uOnDraw.spin.selectedEntry.id),
+    `${uFodder?.entries.length} -> ${uOnDraw?.entries.length}`);
+
   // Unknown command is ignored without a crash.
   const atUnknown = mark();
   cmd('doABarrelRoll', '42');
@@ -592,19 +624,42 @@ async function testSidecar() {
   const closeWindow = async () => {
     const atClose = mark();
     cmd('closeEntries');
-    await since(atClose, (d) => isUpdate(d) && !d.entryMode.open);
+    return since(atClose, (d) => isUpdate(d) && !d.entryMode.open);
   };
   const atOptions = mark();
   cmd('openEntries', '{"maxEntries":9,"windowSec":600}');
   await since(atOptions, (d) => isUpdate(d) && d.entryMode.windowSec === 600);
-  await closeWindow();
+  check('sidecar: closeEntries closes the window', !!(await closeWindow()));
   for (const opts of [`{"maxEntries":${BAD}}`, `{"windowSec":${BAD}}`, `{"maxEntries":[${BAD}]}`, '{"maxEntries":[5]}', '{"windowSec":[]}', '{"maxEntries":null}', '{"windowSec":null}']) {
     const r = await hostile(viewerSays(`openEntries ${opts}`));
     const em = r.after?.entryMode;
+    const closed = await closeWindow();
     check(`sidecar: !wheel openEntries ignores a bad option ${opts}`,
-      r.alive && em.open && em.maxEntries === 9 && em.windowSec === 600
-        && JSON.stringify(r.updates.at(-1)?.entries) === wheelJson, JSON.stringify(r));
-    await closeWindow();
+      r.alive && em.open && em.maxEntries === 9 && em.windowSec === 600 && !!closed
+        && JSON.stringify(r.updates.at(-1)?.entries) === wheelJson, JSON.stringify({ ...r, closed: !!closed }));
+  }
+
+  // Options that do apply: text converts, text that isn't a number keeps the old value, 0 is
+  // a value and not "absent", and the rest rounds into range. Each row starts from the last
+  // row's values, and the table ends back on 9 and 600.
+  for (const [opts, maxEntries, windowSec] of [
+    ['{"maxEntries":"5"}', 5, 600],
+    ['{"windowSec":"300"}', 5, 300],
+    ['{"maxEntries":"abc"}', 5, 300],
+    ['{"windowSec":"abc"}', 5, 300],
+    ['{"windowSec":0}', 5, 0],
+    ['{"maxEntries":99999}', 200, 0],
+    ['{"windowSec":1e12}', 200, 3600],
+    ['{"maxEntries":-5}', 1, 3600],
+    ['{"windowSec":-5}', 1, 0],
+    ['{"maxEntries":2.6,"windowSec":0.4}', 3, 0],
+    ['{"maxEntries":9,"windowSec":600}', 9, 600],
+  ]) {
+    const r = await hostile(viewerSays(`openEntries ${opts}`));
+    const em = r.after?.entryMode;
+    const closed = await closeWindow();
+    check(`sidecar: !wheel openEntries applies ${opts}`,
+      r.alive && em.open && em.maxEntries === maxEntries && em.windowSec === windowSec && !!closed, JSON.stringify({ ...r, closed: !!closed }));
   }
 
   // setEntries replaces the list: a bad field costs only that field, a bad row only that
@@ -620,6 +675,30 @@ async function testSidecar() {
     const got = r.updates.at(-1)?.entries.map(({ label, user, userId }) => ({ label, user, userId }));
     check(`sidecar: !wheel ${input} keeps what's usable`, r.alive && JSON.stringify(got) === JSON.stringify(want), JSON.stringify(r));
   }
+
+  // A bad id, tag or source would reach the overlay and control page, whose drawing and
+  // escaping throw on an object.
+  const rGuard = await hostile(viewerSays(`setEntries [{"label":"Keeper","id":${BAD},"tag":${BAD},"source":${BAD}}]`));
+  const kept = rGuard.updates.at(-1)?.entries[0];
+  check('sidecar: !wheel setEntries replaces a bad id, tag or source',
+    rGuard.alive && typeof kept?.id === 'string' && kept.tag === 'neutral' && kept.source === 'streamer', JSON.stringify(rGuard));
+
+  // The caps: what a list can hold, and how long its text can be.
+  const LONG = 'x'.repeat(100);
+  const rLong = await hostile(viewerSays(`setEntries [{"label":"${LONG}","user":"${LONG}","userId":"${LONG}"}]`));
+  const capped = rLong.updates.at(-1)?.entries[0];
+  check('sidecar: setEntries caps label, user and userId', capped?.label.length === 80 && capped.user?.length === 60 && capped.userId?.length === 60, JSON.stringify(capped ?? null));
+  const rMany = await hostile(() => cmd('setEntries', JSON.stringify(Array.from({ length: 205 }, (_, i) => ({ label: `Row ${i}` })))));
+  const many = rMany.updates.at(-1)?.entries ?? [];
+  check('sidecar: setEntries keeps the first 200 rows, each with its own id',
+    many.length === 200 && many[199].label === 'Row 199' && new Set(many.map((e) => e.id)).size === 200, `${many.length} rows`);
+  const rFull = await hostile(viewerSays('addEntry One too many'));
+  check('sidecar: addEntry refuses a full wheel', rFull.alive && rFull.lastError === 'addEntry: wheel is full (200)' && rFull.updates.length === 0, JSON.stringify(rFull.lastError));
+
+  const rStreamer = await hostile(viewerSays('setEntries [{"label":"Mine"},{"label":"Theirs","source":"chat"}]'));
+  const rClearStreamer = await hostile(viewerSays('clearEntries streamer'));
+  check('sidecar: clearEntries streamer keeps chat entries', rStreamer.alive
+    && JSON.stringify(rClearStreamer.updates.at(-1)?.entries.map((e) => e.label)) === '["Theirs"]', JSON.stringify(rClearStreamer));
 
   // Removal and setTag go by id. findEntry trims its key, so a blank or padded id could never
   // match, and it tries ids first, so an id like "Alpha" would catch another row's label.
@@ -692,11 +771,13 @@ async function testSidecar() {
   // An empty list still clears on purpose. Then the wheel goes back for the restart checks.
   const rEmpty = await hostile(viewerSays('setEntries []'));
   check('sidecar: !wheel setEntries [] still clears the wheel', rEmpty.alive && rEmpty.after.entryCount === 0, JSON.stringify(rEmpty));
+  const savedRows = [...wheelBefore, { id: 'e_saved_chat', label: 'saved_viewer', tag: 'good', source: 'chat', user: 'saved_viewer', userId: 'u777' }];
+  const savedJson = JSON.stringify(savedRows);
   const atRestore = mark();
-  cmd('setEntries', wheelJson);
-  const uRestored = await since(atRestore, (d) => isUpdate(d) && d.entries.length === wheelBefore.length);
-  check('sidecar: setEntries takes back a saved list, ids included',
-    wheelBefore.length > 0 && JSON.stringify(uRestored?.entries) === wheelJson, JSON.stringify(uRestored?.entries ?? null));
+  cmd('setEntries', savedJson);
+  const uRestored = await since(atRestore, (d) => isUpdate(d) && d.entries.length === savedRows.length);
+  check('sidecar: setEntries takes back a saved list, ids and chat rows included',
+    wheelBefore.length > 0 && JSON.stringify(uRestored?.entries) === savedJson, JSON.stringify(uRestored?.entries ?? null));
 
   // ── Restart persistence ──
   const lastUpdate = client.events.filter(isUpdate).pop();

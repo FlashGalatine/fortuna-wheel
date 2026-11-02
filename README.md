@@ -150,7 +150,7 @@ launches harmless.
 
 - `npm start` — mock Streamer.bot (HTTP :7474 + WS :8080) with a landing page;
   `/mock/fixture` broadcasts a sample wheel, POST `/mock/push` any payload.
-- `npm run verify` — 209 offline checks: spin math determinism, the real
+- `npm run verify` — 230 offline checks: spin math determinism, the real
   panel-core against the mock (subscribe case, sync replay, serialized queue),
   HTTP maps, the mock's copy of the action's mapping, a real sidecar E2E (entry CRUD,
   `!entry` dedupe/limits, spin lifecycle, channel point redeems, hostile chat JSON,
