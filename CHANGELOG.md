@@ -10,10 +10,23 @@ traceability.
 
 ## [Unreleased]
 
-**To upgrade,** get the new files and restart the sidecar.
+**To upgrade,** follow "Updating an existing install" in the README. The action's code
+didn't change since 1.0.12, so from 1.0.12 there's nothing to paste; from an older version,
+paste it as the steps say. Either way, refresh the wheel's browser source as well: the wheel
+fix is partly in the overlay.
 
 ### Changed
 
+- **The result card goes at the next change to the wheel.** It used to stay for up
+  to 5 minutes, naming a winner the pointer had moved off. A viewer's `!entry` or a
+  drawing closing itself doesn't count, so chat can't wipe the result. A spin's update
+  carries `segments` and `revealRevision` for this (docs/PROTOCOL.md), until the reveal
+  is over. A theme that draws its own slices should paint `segments` during a spin
+  (docs/THEMING.md).
+- **The overlay ignores an update older than the one on screen.** Updates can arrive
+  out of order, which could bring back a result the wheel had moved past.
+- **The control page's error note says when it happened.** Status has a new
+  `lastErrorAt`.
 - **A script's own ids and loose `removeOnDraw` values no longer carry over.** An `id` in
   `setEntries` or `config.json` is kept only if it looks like one the sidecar made
   (`e_…`), so a script that goes by its own ids has to read the new ones from the update.
@@ -22,6 +35,55 @@ traceability.
 
 ### Fixed
 
+- **The wheel could stop on a slice other than the winner.** This closes the known
+  issue in 1.0.12. The overlay laid out slices from the live list but worked out the
+  rotation for the list at spin time, so any edit during a spin could leave the pointer
+  on a different entry from the one the card named. `removeOnDraw`, `removeAfter` and
+  `removeDrawn` did the same when they took the winner off with the card up. A spin now
+  carries the slices it froze, and the overlay paints those until the reveal is over. No
+  command is refused to do this: an edit during a spin goes on the next wheel, and a
+  drawing opened during a spin takes `!entry` straight away.
+- **"Drawing ready" could outlast the wheel.** `setEntries []` or removing the last
+  entry left the banner and pulse over a disabled Spin button. An empty wheel now clears
+  it, however it emptied. A drawing closed during a spin now waits for the reveal to
+  show it, instead of pulsing a Spin button that's disabled.
+- **An error note stayed until the next spin, however many commands worked after it.**
+  It now clears on the next command that works with no chat user behind it, such as a
+  control page click, including a spin. Chat commands, redeems and the page's status
+  probes no longer clear it, not even a spin from chat, and a refusal from chat can't
+  replace a thrown error, which may be the only record on a launch with no log to read
+  (docs/PROTOCOL.md).
+- **A burst of commands or a stop during a save could wipe the wheel.** Every change
+  started its own write to `config.json`, with nothing waiting for the one before. Two
+  close together could leave a corrupt file, and stopping the sidecar during a stalled
+  write left an empty one. The next start logged `Bad config JSON` and brought up a blank
+  wheel, and the next change overwrote what was left. Saves now run one at a time, a
+  burst shares one write, and each goes through `config.json.tmp` and a rename, so a stop
+  at any moment leaves the last whole save. Ctrl+C or closing the console window waits up
+  to 2 seconds for a running save. Windows refuses the rename while another program has
+  the file open, even just to read it, so a refused save keeps its temp file and retries
+  by itself, rewriting it only if the config changed. If that lasts, a note on the
+  control page stays for as long as saves are failing, through a spin or a failed
+  command.
+- **A `config.json` the sidecar couldn't use could be lost.** One that won't parse, from
+  a hand edit or an older version, or that parses but isn't a config (anything but an
+  object, `entries` that isn't a list, or an `entries` list with nothing usable in it),
+  is now copied first, with a note on the control page naming the copy. The copy goes to
+  `config.json.bad`, then `config.json.bad.1` and so on, so it never replaces an earlier
+  one. `"entries": []` is still an empty wheel, with no copy and no note. A file with no
+  `entries` key, which is also what a misspelled key looks like, keeps its settings and
+  starts an empty wheel, with the same copy and a note that no entries list was found. A
+  file another program holds at startup is waited for: the sidecar used to start blank,
+  and its next change overwrote the file. Any other read error, or a file that needs a
+  copy and can't get one, starts an empty wheel with a note, and nothing is saved over
+  the file until the sidecar restarts. These notes stay on the control page for the whole
+  run, through a spin, a failed command or a save, and a restart on a good file clears
+  them.
+- **A `config.json` saved with a byte order mark read as damaged.** Editors on Windows
+  often add one, and the wheel started empty with every entry intact. It's now ignored.
+- **A first run that couldn't write `config.json` started empty.** It logged that
+  `config.example.json` was missing. It now starts on the example's entries and logs the
+  real error.
 - **A throw in a timer could stop the sidecar.** 1.0.12 logged and dropped a throw while a
   command was being handled, but not one in the part that runs later on a timer: a spin's
   reveal or a timed entry window's close. Those are now logged and dropped too, with the
@@ -56,7 +118,8 @@ traceability.
   A block that passes comes back whole, including any field the sidecar doesn't check. A
   `lastSpin` with a hand-edited or missing `state`, or one that isn't an object, was
   already dropped, but with no word of it. It now gets the same line and note, naming
-  `state` or `lastSpin`. Only `null` or no `lastSpin` at all stays quiet.
+  `state` or `lastSpin`. Only `null` or no `lastSpin` at all stays quiet. Like the other
+  notes about how `config.json` loaded, this one stays until a restart.
 - **Viewer text could forge lines in the sidecar's log.** A newline or terminal escape
   in a label, typed as `\n` or `\u001b` in `!wheel` JSON, reached the log as the real
   character. Control characters and Unicode direction controls now print escaped, and a
@@ -65,8 +128,8 @@ traceability.
 - **A settings change didn't reach `fortuna:update`.** `setSettings` only sent a status,
   so a custom overlay reading `settings` from the update, or connecting later and getting
   the replay, saw the old values until the next change. A change now pushes an update too,
-  at the same `revision`, because the wheel itself hasn't changed. A `setSettings` that
-  changes nothing still sends only a status.
+  at the same `revision`, because the wheel itself hasn't changed, so it doesn't end a result
+  on show. A `setSettings` that changes nothing still sends only a status.
 
 ### Documentation
 
@@ -77,8 +140,15 @@ traceability.
   has no wheel of its own, it never sends `setEntries`, `spin` stays non-null after the
   first draw, and an unknown command or an ignored `entry` gets no status back.
 
-Verified offline: `verify` 266/266, `verify:render` 15/15. None of these fixes has run on a
-live Streamer.bot.
+Verified offline: `verify` 397/397, with its ten held-file checks on Windows only
+(reported as skipped elsewhere), and `verify:render` 31/31. Closing the console
+window is tested by delivering its signal inside the process, not by closing a real
+window. Not run on a live Streamer.bot.
+
+Not yet verified live: the wheel, Drawing ready and error note fixes. They ran in a
+browser against the real sidecar and the mock. The error note relies on commands
+arriving with no `user`. A control page spin did on real Streamer.bot 1.0.7, but a
+Stream Deck action hasn't been checked.
 
 ## [1.0.12] — 2026-11-01
 

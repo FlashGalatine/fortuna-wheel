@@ -32,6 +32,10 @@ wheel-specific** — a Magic 8-ball theme is a valid consumer (docs/THEMING.md).
   "spin": {
     "spinId": "s_mrn41x2a",
     "entryCount": 8,
+    "segments": [
+      { "label": "Win with no jumping", "tag": "bad" },
+      { "label": "chatter_99", "tag": "good" }
+    ],
     "selectedIndex": 3,
     "selectedEntry": { "id": "e_c3d4", "label": "chatter_99", "tag": "good", "source": "chat" },
     "seed": 987654321,
@@ -56,9 +60,23 @@ wheel-specific** — a Magic 8-ball theme is a valid consumer (docs/THEMING.md).
   `durationMs` (plus a 300 ms grace so every client's animation has finished).
   If `removeOnDraw` / per-spin `removeAfter` is set, the drawn entry is removed
   in the same revealed broadcast.
-- `entryCount` freezes the segment count at spin time (the list can shrink
-  afterwards); `selectedEntry` is embedded so the reveal survives entry
-  mutations.
+- `entryCount` and `segments` freeze the wheel at spin time: the slice count, and
+  each slice's `label` and `tag` in order. `selectedEntry` is embedded so the reveal
+  survives entry mutations. `entries` stays live, because commands still work during
+  a spin and removeOnDraw takes the winner off at the reveal. **A surface that draws
+  the slices paints `segments`, not `entries`, until the reveal is over:** the
+  rotation only lands on the winner on that list. `paintedEntries()` in
+  overlay/spin-math.js makes the choice.
+- A reveal is over once something changes after it. The revealed block carries
+  `revealRevision`, the update `revision` it was revealed at, so a higher `revision`
+  means the wheel has moved on: the overlay hides the result card and paints
+  `entries` again (`revealOnShow()` in overlay/spin-math.js), and the sidecar drops
+  `segments` from the block. A viewer's `!entry` and a drawing closing itself don't
+  count, because nobody has moved on from the result: those updates carry
+  `revealRevision` forward. A `setSettings` change sends an update at the same
+  `revision`, so it doesn't end a reveal either. The card also stops replaying on a
+  reconnect 5 minutes after the spin. A block without these fields, from an older
+  sidecar, paints `entries`.
 
 ### Spin determinism
 
@@ -103,6 +121,11 @@ Commands the sidecar understands (`value` is a string; JSON where noted):
 | `status` | — request a `fortuna:status` snapshot | any |
 | `__status` | reserved — the sidecar's own status relay (see below) | sidecar only |
 
+Only `spin` is refused during a spin. The list commands, `openEntries` and `entry`
+run as usual and change `entries`, so they show on the next wheel, not this one. A
+spin closes an open drawing when it starts, and `entry` is ignored until one is open
+again.
+
 **Burst warning (SB 1.0.4):** never fire several DoActions to the same action
 within a few milliseconds — Streamer.bot bleeds arguments between them.
 panel-core serializes its queue; the control page sends one batched command per
@@ -124,11 +147,40 @@ snapshot; the control page probes every 10 seconds.
   "ready": false, "spinning": false,
   "lastSpin": { "label": "chatter_99", "tag": "good" },
   "settings": { "removeOnDraw": false, "defaultChatTag": "good" },
-  "lastError": "" }
+  "lastError": "", "lastErrorAt": null }
 ```
 
-`ready:true` = the viewer drawing filled up (max reached) or timed out — the
-control page pulses the Spin button.
+`ready:true` = a viewer drawing closed with entries on the wheel: it filled up
+(max reached), timed out, or was closed by hand. The control page pulses the Spin
+button. It clears when a spin starts, a drawing opens, `clearEntries` runs, or the
+wheel empties any other way. It stays off during a spin, so a drawing closed mid-spin
+shows as ready after the reveal.
+
+`lastError` is the latest failure: a refused command, or a throw in a command, in a
+timer or anywhere else nothing caught it. A launch with no window has no log to read,
+so this note can be the only record. A later refusal can replace a refusal's note, but
+not a thrown error's.
+
+- **What clears it:** the next `addEntry`, `removeEntry`, `setTag`, `clearEntries`,
+  `setEntries`, `openEntries`, `closeEntries`, `spin`, `removeDrawn` or `setSettings`
+  with no `user`. That only means it didn't come from chat: a control page click, but
+  also a timed action nobody may be watching. A Stream Deck action counts if it sets no
+  `user`, which hasn't been checked. If that command fails too, its own failure becomes
+  the note. A sidecar restart also clears
+  it, because it isn't saved.
+- **What doesn't:** chat commands, `!entry` and redeems, which can land while nobody
+  is looking; the page's own `status` probes, which run every 10 seconds regardless;
+  an unknown command; and the timers behind a reveal or a timed drawing.
+
+`lastErrorAt` is when it happened (an ISO time, `null` with no note). The control
+page shows it, so an old note reads as a past event and not a current fault.
+
+The text can also carry two standing notes about `config.json`, ahead of the latest
+failure and joined with ` · `: one about how it loaded, which lasts until a restart,
+and one while saves keep failing, which ends when a save lands. No command clears
+either. The one about how it loaded covers a bad saved last draw as well as a damaged
+file, and a file with both problems shows both. `lastErrorAt` dates only the failure
+at the end of the text, and is `null` when the text holds only standing notes.
 
 ## `fortuna:error`
 

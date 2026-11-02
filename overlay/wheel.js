@@ -20,12 +20,12 @@
   const ctx = canvas.getContext('2d');
 
   // Reveal replays: a reconnect re-delivers the persisted payload, which still
-  // carries the last revealed spin. The card re-shows while the reveal is
-  // recent; the effect only fires close to the actual moment (and once per spin).
-  const REVEAL_CARD_MAX_AGE_MS = 5 * 60 * 1000;
+  // carries the last revealed spin. The card re-shows while the reveal is on show
+  // (spin-math.js); the effect only fires close to the actual moment (and once per spin).
   const EFFECT_MAX_AGE_MS = 10 * 1000;
 
   let state = null; // latest fortuna:update payload
+  let painted = []; // the slices on the wheel, frozen during a spin (spin-math.js)
   let raf = null;
   let effectCancel = null;
   let effectSpinId = null;
@@ -53,7 +53,7 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size, size);
 
-    const entries = state ? state.entries : [];
+    const entries = painted;
     const n = entries.length;
     const cx = size / 2;
     const cy = size / 2;
@@ -192,8 +192,17 @@
   // ── State intake ────────────────────────────────────────────────────────────
 
   function apply(payload) {
+    // Pushes can arrive out of order, so an older update never replaces a newer one. This
+    // goes by time first, because a reset or restored config starts its revisions over.
+    const newerBy = state ? Date.parse(state.generatedAt) - Date.parse(payload.generatedAt) : 0;
+    if (state && (newerBy > 0 || (newerBy === 0 && payload.revision < state.revision))) return;
+
     state = payload;
     const spin = payload.spin;
+    const now = Date.now();
+    // spin-math.js can be older than this file (cached, or vendored by a theme). With no
+    // helpers, this falls back on the live list and the spin's own state.
+    painted = M.paintedEntries ? M.paintedEntries(payload, now) : payload.entries;
 
     // Entries-open banner.
     if (payload.entryMode && payload.entryMode.open) {
@@ -204,13 +213,8 @@
       bannerEl.hidden = true;
     }
 
-    if (spin && spin.state === 'revealed') {
-      const age = Date.now() - (Date.parse(spin.startedAt) + spin.durationMs);
-      if (age <= REVEAL_CARD_MAX_AGE_MS) showReveal(spin);
-      else hideReveal();
-    } else {
-      hideReveal();
-    }
+    if (M.revealOnShow ? M.revealOnShow(payload, now) : spin && spin.state === 'revealed') showReveal(spin);
+    else hideReveal();
 
     animate();
   }

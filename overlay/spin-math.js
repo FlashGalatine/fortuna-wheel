@@ -10,6 +10,7 @@
   'use strict';
 
   var TAU = Math.PI * 2;
+  var REVEAL_MAX_AGE_MS = 5 * 60 * 1000;
 
   // Angle (radians, clockwise from the pointer at 12 o'clock) of the CENTER of
   // segment i on an N-segment wheel drawn with segment 0 starting at the pointer.
@@ -54,5 +55,30 @@
     return Math.floor(pointerAngle / (TAU / n)) % n;
   }
 
-  root.FortunaSpinMath = { TAU: TAU, segmentCenter: segmentCenter, jitter: jitter, targetRotation: targetRotation, ease: ease, progress: progress, rotationAt: rotationAt, segmentAt: segmentAt };
+  // Whether a revealed spin is still on show: nothing has changed since the sidecar
+  // revealed it, and it's recent enough for a reconnect to replay. A spin saved before
+  // revealRevision existed has nothing to compare, so only its age counts.
+  function revealOnShow(payload, nowMs) {
+    var spin = payload.spin;
+    if (!spin || spin.state !== 'revealed') return false;
+    if (spin.revealRevision != null && spin.revealRevision !== payload.revision) return false;
+    return nowMs - (Date.parse(spin.startedAt) + spin.durationMs) <= REVEAL_MAX_AGE_MS;
+  }
+
+  // The slices to paint. The rotation only lands on the winner on the list it was worked
+  // out for, so a spin paints its frozen segments from launch until its reveal is over:
+  // edits during the spin, and removeOnDraw at the reveal, only change the live entries.
+  // A spin block with no usable segments (an older sidecar, a hand-edited config) paints
+  // the live list.
+  function paintedEntries(payload, nowMs) {
+    var spin = payload.spin;
+    if (!spin || !(spin.state === 'spinning' || revealOnShow(payload, nowMs))) return payload.entries;
+    var slices = spin.segments;
+    var usable = Array.isArray(slices) && slices.length === spin.entryCount && slices.every(function (s) {
+      return s && typeof s.label === 'string' && typeof s.tag === 'string';
+    });
+    return usable ? slices : payload.entries;
+  }
+
+  root.FortunaSpinMath = { TAU: TAU, segmentCenter: segmentCenter, jitter: jitter, targetRotation: targetRotation, ease: ease, progress: progress, rotationAt: rotationAt, segmentAt: segmentAt, revealOnShow: revealOnShow, paintedEntries: paintedEntries };
 })(typeof window !== 'undefined' ? window : globalThis);

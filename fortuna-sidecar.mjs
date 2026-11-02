@@ -23,21 +23,26 @@
 //           status. (docs/PROTOCOL.md has the full table.)
 //
 // State lives in ./config.json (gitignored; seeded from config.example.json on
-// first run) — a restart restores the entries and the last revealed spin.
+// first run) — a restart restores the entries and the last revealed spin. Saves
+// go through config.json.tmp one at a time, so stopping the process at any moment
+// leaves the last whole save.
 //
 // Run:  start-fortuna.bat  ·  npm run sidecar
 // Env:  SB_WS_URL (default ws://127.0.0.1:8080/) · FORTUNA_GUARD_PORT (7493)
 //       FORTUNA_CONFIG (config file path override)
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { copyFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomInt } from 'node:crypto';
 import { createServer } from 'node:net';
-import { resolve, dirname } from 'node:path';
+import { basename, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = process.env.FORTUNA_CONFIG || resolve(__dirname, 'config.json');
+const TEMP_PATH = `${CONFIG_PATH}.tmp`;
+const BAD_PATH = `${CONFIG_PATH}.bad`;
 const EXAMPLE_PATH = resolve(__dirname, 'config.example.json');
 const SB_WS_URL = process.env.SB_WS_URL || `ws://127.0.0.1:${process.env.SB_WS_PORT || 8080}/`;
 // Single-instance guard: a second launch (double-click + SB action) exits
@@ -53,6 +58,10 @@ const TAGS = ['good', 'bad', 'neutral'];
 // "Alpha" would catch removal by another entry's label.
 const ENTRY_ID = /^e_[\w-]{1,40}$/;
 const REVEAL_GRACE_MS = 300; // reveal broadcast lands after every client's animation finished
+const FILE_RETRY_MIN_MS = 50;
+const FILE_RETRY_MAX_MS = 5000;
+const FILE_RETRY_WARN_MS = 1000; // a wait this long is more than a scanner passing by, so say so
+const SHUTDOWN_SAVE_WAIT_MS = 2000;
 
 let config = {
   entries: [], // { id, label, tag, source: 'streamer'|'chat', user? , userId? }
@@ -65,8 +74,17 @@ let config = {
 let activeSpin = null; // in-flight spin block (state:"spinning") + its timers
 let revealTimer = null;
 let windowTimer = null;
-let entriesReady = false; // viewer drawing filled up / timed out — control page highlights Spin
-let lastError = '';
+let entriesReady = false; // viewer drawing closed with entries on the wheel — control page highlights Spin
+let lastError = ''; // the latest failure, kept until an operator command comes in (dispatch)
+let lastErrorAt = null;
+let lastErrorThrew = false; // a thrown error may be the only record of it, so a refusal can't replace it
+
+let saveDirty = false; // the config changed since the last save started
+let saveLoop = null; // the running save loop, if any; there is only ever one
+let saveNote = ''; // what the control page also shows while saves keep failing
+let loadNote = ''; // what it also shows about how config.json loaded; only a restart ends this one
+let savesHeld = false; // config.json couldn't be read or copied, so nothing may replace it this run
+let tempText = null; // what config.json.tmp holds after a refused rename, so a retry can reuse it
 
 let sbWs = null;
 let sbReconnectTimer = null;
@@ -75,23 +93,112 @@ let sbMsgId = 0;
 // ── Config ────────────────────────────────────────────────────────────────────
 
 async function loadConfig() {
-  let raw = null;
+  // A temp file here is a save that a stopped process never finished. It never became the
+  // config, so it's only in the way.
+  await rm(TEMP_PATH, { force: true }).catch(() => {});
+  let raw;
   try {
-    raw = await readFile(CONFIG_PATH, 'utf-8');
+    raw = await readConfigFile();
   } catch (err) {
-    if (err.code !== 'ENOENT') log(`Could not read config: ${err.message}`);
+    log(`Could not read config: ${err.message}`);
+    holdSaves(`could not read config.json (${err.code ?? 'error'}), so the wheel started empty and nothing will be saved over it. Fix the file and restart the sidecar.`);
+    return;
   }
-  if (raw == null) {
+  const seeding = raw == null; // the example holds no wheel of the streamer's to protect
+  if (seeding) {
     try {
       raw = await readFile(EXAMPLE_PATH, 'utf-8');
-      await writeFile(CONFIG_PATH, raw, 'utf-8');
-      log('Seeded config.json from config.example.json');
     } catch {
       log('No config.example.json — using built-in defaults');
       return;
     }
+    try {
+      await writeConfigFile(raw);
+      log('Seeded config.json from config.example.json');
+    } catch (err) {
+      log(`Could not seed config.json from config.example.json: ${err.message}`);
+    }
   }
-  try { adoptConfig(JSON.parse(raw)); } catch (err) { log(`Bad config JSON: ${err.message}`); }
+  try {
+    // An editor's byte order mark is harmless, but JSON.parse refuses it.
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, ''));
+    // Valid JSON that isn't a wheel would read as an empty one, and the next save would replace it.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || (parsed.entries !== undefined && !Array.isArray(parsed.entries))) {
+      throw new Error('not a config object with a list of entries');
+    }
+    // [] is an empty wheel on purpose. A list with nothing usable in it isn't, as in setEntries.
+    if (!seeding && parsed.entries?.length && !parsed.entries.some(normalizeEntry)) {
+      throw new Error('an entries list with nothing usable in it');
+    }
+    adoptConfig(parsed);
+    // A settings-only file is allowed, but a misspelled key reads the same.
+    if (!seeding && parsed.entries === undefined) await keepConfigCopy('no entries list was found in config.json');
+  } catch (err) {
+    log(`Bad config JSON: ${err.message}`);
+    await keepConfigCopy('config.json was damaged');
+  }
+}
+
+// The next save replaces this file, and it may be the only copy of the streamer's wheel.
+async function keepConfigCopy(problem) {
+  try {
+    const copyPath = await copyConfigAside();
+    addLoadNote(`${problem}, so the wheel started empty. A copy is kept as ${basename(copyPath)}.`);
+  } catch (copyErr) {
+    log(`Could not copy config: ${copyErr.message}`);
+    holdSaves(`${problem} and no copy could be made (${copyErr.code ?? 'error'}), so the wheel started empty and nothing will be saved over it. Fix the file and restart the sidecar.`);
+  }
+}
+
+// Null only when the file isn't there. Any other failure means the wheel may still be in it, so
+// starting blank or seeding would overwrite it with the next save.
+async function readConfigFile() {
+  try {
+    return await waitWhileBusy(() => readFile(CONFIG_PATH, 'utf-8'), 'Could not read config');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+// The first free name, so a copy that may hold the only good wheel never gets replaced.
+async function copyConfigAside() {
+  for (let n = 0; ; n++) {
+    const copyPath = n ? `${BAD_PATH}.${n}` : BAD_PATH;
+    try {
+      await waitWhileBusy(() => copyFile(CONFIG_PATH, copyPath, constants.COPYFILE_EXCL), 'Could not copy config');
+      return copyPath;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+  }
+}
+
+// EBUSY is what a Windows sharing violation maps to: another program has the file for now, so
+// wait for it. Any other error won't pass by itself, so it goes back to the caller.
+async function waitWhileBusy(attempt, what) {
+  for (let retryMs = FILE_RETRY_MIN_MS; ; retryMs = Math.min(retryMs * 2, FILE_RETRY_MAX_MS)) {
+    try {
+      return await attempt();
+    } catch (err) {
+      if (err.code !== 'EBUSY') throw err;
+      if (retryMs >= FILE_RETRY_WARN_MS) log(`${what}, waiting for it: ${err.message}`);
+      await sleep(retryMs);
+    }
+  }
+}
+
+// For the rest of this run, the file on disk may be the only copy of the wheel.
+function holdSaves(note) {
+  savesHeld = true;
+  addLoadNote(note);
+}
+
+// A file can have more than one thing wrong with it: a bad saved draw is noted while the config
+// is adopted, and a missing entries list after that. Each note may be the only word of it.
+function addLoadNote(note) {
+  loadNote = loadNote ? `${loadNote} · ${note}` : note;
+  log(note);
 }
 
 function adoptConfig(parsed) {
@@ -186,14 +293,68 @@ function normalizeSpin(s) {
     : !Number.isFinite(extraSpins) ? 'extraSpins'
     : null;
   if (!bad) return { ...s, selectedEntry };
-  lastError = `config.json: the saved last draw has a bad ${bad}, so it was dropped`;
-  log(lastError);
+  addLoadNote(`config.json: the saved last draw has a bad ${bad}, so it was dropped`);
   return null;
 }
 
-async function persist() {
-  try { await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8'); }
-  catch (err) { log(`Could not persist config: ${err.message}`); }
+// One save runs at a time. A change during a save only marks the config dirty, and the loop then
+// writes the newest state once, so a burst of commands can't overlap its writes or queue them up.
+// A failed save stays dirty and retries by itself, because its change may be the last for a while:
+// Windows refuses the rename while anything has config.json open, even a scanner only reading it.
+function persist() {
+  if (savesHeld) return;
+  saveDirty = true;
+  saveLoop ??= runSaves();
+}
+
+async function runSaves() {
+  let retryMs = FILE_RETRY_MIN_MS;
+  while (saveDirty) {
+    saveDirty = false;
+    try {
+      await writeConfigFile(JSON.stringify(config, null, 2));
+      retryMs = FILE_RETRY_MIN_MS;
+      if (saveNote) {
+        log('config.json is saving again');
+        saveNote = '';
+        pushStatus();
+      }
+    } catch (err) {
+      saveDirty = true;
+      if (retryMs >= FILE_RETRY_WARN_MS && !saveNote) {
+        saveNote = `could not save config.json (${err.code ?? 'error'}), still trying: is another program holding it?`;
+        log(`Could not persist config, still trying: ${err.message}`);
+        try { pushStatus(); } catch { /* the log line is the record */ }
+      }
+      await sleep(retryMs);
+      retryMs = Math.min(retryMs * 2, FILE_RETRY_MAX_MS);
+    }
+  }
+  saveLoop = null;
+}
+
+// config.json only ever goes from one whole save to the next, because the temp file takes the
+// truncating and the partial writes. The flush covers a power cut or a PC crash, which could
+// otherwise leave the renamed file empty (Node before 20.10 ignores it). A refused rename keeps the
+// temp file, so a retry with nothing new only has to rename it again.
+async function writeConfigFile(text) {
+  if (text !== tempText) {
+    tempText = null;
+    try {
+      await writeFile(TEMP_PATH, text, { encoding: 'utf-8', flush: true });
+    } catch (err) {
+      await rm(TEMP_PATH, { force: true }).catch(() => {});
+      throw err;
+    }
+    tempText = text;
+  }
+  try {
+    await rename(TEMP_PATH, CONFIG_PATH);
+    tempText = null;
+  } catch (err) {
+    if (err.code === 'ENOENT') tempText = null; // the temp file went away, so the retry rewrites it
+    throw err;
+  }
 }
 
 // Chat can send any JSON through "!wheel <command> <JSON>", and String() and Number()
@@ -216,6 +377,10 @@ function parseJson(v) {
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}${randomInt(1679616).toString(36).padStart(4, '0')}`;
+}
+
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
 }
 
 // ── Payload / broadcast ───────────────────────────────────────────────────────
@@ -261,11 +426,14 @@ function pushStatus() {
         ? Math.max(0, Math.round((Date.parse(em.openedAt) + em.windowSec * 1000 - Date.now()) / 1000))
         : null,
     },
-    ready: entriesReady,
+    ready: entriesReady && !activeSpin, // a drawing closed mid-spin is ready once the spin is over
     spinning: !!activeSpin,
     lastSpin: config.lastSpin ? { label: config.lastSpin.selectedEntry.label, tag: config.lastSpin.selectedEntry.tag } : null,
     settings: { ...config.settings },
-    lastError,
+    // The standing notes first and the latest failure last, so a time printed after the text sits next
+    // to that failure. A failed command or a spin changes lastError and ends neither standing note.
+    lastError: [loadNote, saveNote, lastError].filter(Boolean).join(' · '),
+    lastErrorAt,
   };
   // The reserved pair wins in the C# action, so a Set Argument for `command` inside
   // it can't turn this into a spin. `command`/`value` keep older actions working, at
@@ -274,15 +442,33 @@ function pushStatus() {
   doAction('Fortuna Command', { command: '__status', value: json, fortunaCommand: '__status', fortunaValue: json });
 }
 
-function applyChange() {
+// What every new revision brings, for applyChange and for later()'s catch, which can't call it.
+// keepReveal: a viewer joining or a drawing closing itself isn't anyone moving on from the
+// result, so a reveal on show stays on show.
+function raiseRevision(keepReveal = false) {
+  if (!config.entries.length) entriesReady = false; // nothing left to spin, however it emptied
+  if (keepReveal && config.lastSpin?.revealRevision === config.revision) config.lastSpin.revealRevision = config.revision + 1;
   config.revision++;
+  // Only a reveal on show paints its frozen slices. After that they'd just ride along in every update.
+  if (config.lastSpin?.segments && config.lastSpin.revealRevision !== config.revision) delete config.lastSpin.segments;
+}
+
+function applyChange(keepReveal = false) {
+  raiseRevision(keepReveal);
   persist();
   pushUpdate();
   pushStatus();
 }
 
-function fail(msg) {
+function noteError(msg, threw = false) {
+  if (lastErrorThrew && !threw) return; // an operator command clears it first (dispatch)
   lastError = msg;
+  lastErrorAt = new Date().toISOString();
+  lastErrorThrew = threw;
+}
+
+function fail(msg) {
+  noteError(msg);
   log(msg);
   pushStatus();
 }
@@ -290,7 +476,7 @@ function fail(msg) {
 // The backstop: a throw is logged and dropped, though it may leave its work half applied.
 // The note carries the error because a hidden launch has no log to read.
 function noteThrow(what, err) {
-  lastError = `${what} failed: ${err?.message ?? err}`;
+  noteError(`${what} failed: ${err?.message ?? err}`, true);
   // Only the stack's frame lines: its first line repeats the message, which can quote a value.
   try {
     log(`${lastError}${err?.name ? ` (${err.name})` : ''}`, String(err?.stack ?? '').split('\n').filter((line) => /^\s+at /.test(line)));
@@ -305,9 +491,10 @@ function later(what, ms, fn) {
   return setTimeout(() => {
     const revision = config.revision;
     try { fn(); } catch (err) {
-      // fn may have raised the revision before it threw, and one change counts once.
+      // fn may have raised the revision before it threw, and one change counts once. With no
+      // keepReveal here, a throw in a timed close ends a reveal on show. No known input reaches that.
       try {
-        if (config.revision === revision) config.revision++;
+        if (config.revision === revision) raiseRevision();
         persist();
         pushUpdate();
       } catch { /* noteThrow still reports it */ }
@@ -351,7 +538,7 @@ function chatEntry(user, userId) {
   if (config.entries.filter((e) => e.source === 'chat').length >= config.entryMode.maxEntries) {
     closeEntryWindow('full');
   } else {
-    applyChange();
+    applyChange(true);
   }
 }
 
@@ -380,7 +567,7 @@ function closeEntryWindow(reason) {
   // entries collected) — the control page lights the Spin button.
   if (wasOpen && config.entries.length > 0) entriesReady = true;
   log(`entries CLOSED (${reason}) — ${config.entries.length} on the wheel${entriesReady ? ', READY' : ''}`);
-  applyChange();
+  applyChange(reason === 'time' || reason === 'full');
 }
 
 // ── Spin engine ───────────────────────────────────────────────────────────────
@@ -388,7 +575,7 @@ function closeEntryWindow(reason) {
 function spin(opts) {
   if (activeSpin) { fail('spin: already spinning'); return; }
   if (config.entries.length < 1) { fail('spin: the wheel is empty'); return; }
-  if (config.entryMode.open) closeEntryWindow('spin'); // no late entries mid-spin
+  if (config.entryMode.open) closeEntryWindow('spin'); // this wheel is set; one opened mid-spin feeds the next
 
   const n = config.entries.length;
   const selectedIndex = randomInt(n);
@@ -398,6 +585,9 @@ function spin(opts) {
   activeSpin = {
     spinId: newId('s'),
     entryCount: n, // segment count frozen at spin time — removeOnDraw mutates the list after
+    // What the wheel shows until the reveal is over. Commands stay open during a spin, so
+    // the live list can change under it, and removeOnDraw changes it at the reveal.
+    segments: config.entries.map(({ label, tag }) => ({ label, tag })),
     selectedIndex,
     selectedEntry: { ...config.entries[selectedIndex] },
     seed,
@@ -417,14 +607,16 @@ function spin(opts) {
     reveal(removeAfter);
   });
   entriesReady = false;
-  lastError = '';
   log(`SPIN → [${selectedIndex}] "${activeSpin.selectedEntry.label}" (${activeSpin.selectedEntry.tag}), ${activeSpin.durationMs}ms, ${activeSpin.extraSpins} turns${removeAfter ? ', remove after' : ''}`);
   applyChange();
 }
 
 function reveal(removeAfter) {
   if (!activeSpin) return;
-  config.lastSpin = { ...activeSpin, state: 'revealed' };
+  // The revision applyChange() below gives this reveal. Once the wheel's revision passes it,
+  // the wheel has moved on and the overlay stops showing it. If something below throws first,
+  // later()'s catch raises the revision to the same number, so the reveal still stays on show.
+  config.lastSpin = { ...activeSpin, state: 'revealed', revealRevision: config.revision + 1 };
   activeSpin = null; // before anything that can throw, so the next spin isn't refused
   if (removeAfter) removeEntryById(config.lastSpin.selectedEntry.id);
   log(`REVEALED "${config.lastSpin.selectedEntry.label}"${removeAfter ? ' (removed from wheel)' : ''}`);
@@ -439,9 +631,19 @@ function removeEntryById(id) {
 
 // ── Command dispatch (inbound half of the bus) ────────────────────────────────
 
+// Every other command an operator can send clears the error note, so a new one counts by default.
+const NOT_OPERATOR_COMMANDS = ['entry', 'status'];
+
 function dispatch(command, value, user, userId) {
   if (command === '__status') return; // our own status relay echoing back
   log(`command: ${command.slice(0, 120)}${value ? ' ' + value.slice(0, 120) : ''}${user ? ` (from ${user.slice(0, 60)})` : ''}`);
+  // The note is the only record on a hidden launch, so chat can't clear it, only the next
+  // operator command with no user behind it. No user just means it didn't come from chat: a
+  // control page click, but also a timed action, which nobody may be watching. If the command
+  // fails, it sets a new note. Chat, redeems and the page's own status probes don't count
+  // (docs/PROTOCOL.md).
+  const noteBefore = [lastError, lastErrorAt, lastErrorThrew];
+  if (!user && !NOT_OPERATOR_COMMANDS.includes(command)) { lastError = ''; lastErrorAt = null; lastErrorThrew = false; }
   switch (command) {
     case 'addEntry': {
       // JSON {label, tag} from the control page, or plain chat text
@@ -513,8 +715,8 @@ function dispatch(command, value, user, userId) {
         if (o.removeOnDraw !== undefined) config.settings.removeOnDraw = o.removeOnDraw === true || o.removeOnDraw === 'true';
         if (o.defaultChatTag !== undefined && TAGS.includes(o.defaultChatTag)) config.settings.defaultChatTag = o.defaultChatTag;
       }
-      // Not applyChange: the wheel itself hasn't changed, so the revision stays. A new value
-      // still has to reach the replay.
+      // Not applyChange: the wheel itself hasn't changed, so the revision stays and a reveal on
+      // show stays with it. A new value still has to reach the replay.
       if (JSON.stringify(config.settings) !== before) {
         persist();
         pushUpdate();
@@ -524,6 +726,7 @@ function dispatch(command, value, user, userId) {
     }
     case 'status': pushStatus(); return;
     default:
+      [lastError, lastErrorAt, lastErrorThrew] = noteBefore; // an unknown command doesn't count
       log(`unknown command "${command.slice(0, 120)}" — ignored`);
   }
 }
@@ -633,15 +836,20 @@ async function main() {
   process.on('uncaughtException', backstop);
   process.on('unhandledRejection', backstop);
   connectSb();
-  const shutdown = () => {
+  const shutdown = async () => {
     log('shutting down');
     if (revealTimer) clearTimeout(revealTimer);
     if (windowTimer) clearTimeout(windowTimer);
     try { sbWs?.close(); } catch {}
+    // Let a running save finish, but a stalled one can't hold up the exit: config.json keeps the
+    // last whole save, and the next start removes the temp file.
+    setTimeout(() => { log('stopping with the last change unsaved'); process.exit(0); }, SHUTDOWN_SAVE_WAIT_MS);
+    await saveLoop;
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  process.on('SIGHUP', shutdown); // closing the console window, which Windows allows about 10 seconds
 }
 
 main();
