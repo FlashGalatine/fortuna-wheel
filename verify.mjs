@@ -1154,7 +1154,7 @@ async function sidecarChecks(cfgDir) {
     const atFailedHeld = mark();
     cmd('removeEntry', 'Nothing by this name');
     const sFailedHeld = await since(atFailedHeld, (d) => isStatus(d) && parseStatus(d).lastError.includes('removeEntry:'), 3000);
-    check('sidecar: a failed command during a refused save shows both notes', !!sFailedHeld && showsRefusal(sFailedHeld), sFailedHeld?.value);
+    check('sidecar: a failed command during a refused save shows both notes, with the failure last and dated', !!sFailedHeld && showsRefusal(sFailedHeld) && parseStatus(sFailedHeld).lastError.endsWith('removeEntry: no entry "Nothing by this name"') && !!parseStatus(sFailedHeld).lastErrorAt, sFailedHeld?.value);
     const atSpinHeld = mark();
     cmd('spin');
     const sSpinHeld = await since(atSpinHeld, (d) => isStatus(d) && parseStatus(d).spinning, 3000);

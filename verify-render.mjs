@@ -159,6 +159,12 @@ try {
     check('control: HTML in a status stays text', rendered === 0 && statusText.includes(forged.entryCount), statusText);
     check('control: a status can\'t run script', (await page.evaluate(() => window.__forged ?? null)) === null);
 
+    // A standing note about config.json has no time of its own, so it mustn't show one.
+    await page.evaluate((v) => window.__FORTUNA_SEND_COMMAND('__status', v), JSON.stringify({ lastError: 'A standing note', lastErrorAt: null }));
+    await page.waitForFunction(() => document.querySelector('#status .err')?.textContent.includes('A standing note'), null, { timeout: 5000 });
+    const standing = await page.locator('#status .err').textContent();
+    check('control: a note with no time shows none', !standing.includes('(at '), standing);
+
     // A label stays inside its quoted attributes, and reads back unchanged.
     const quoted = 'Don\'t " onmouseover="window.__label=1';
     await fetch(`${HTTP}/mock/push`, {

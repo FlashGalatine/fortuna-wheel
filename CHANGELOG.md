@@ -87,7 +87,7 @@ fix is partly in the overlay.
   the 1.0.12 notes below.
 
 Verified offline: `verify` 284/284, with its ten held-file checks on Windows only
-(reported as skipped elsewhere), and `verify:render` 29/29. Closing the console
+(reported as skipped elsewhere), and `verify:render` 30/30. Closing the console
 window is tested by delivering its signal inside the process, not by closing a real
 window. Not run on a live Streamer.bot.
 
