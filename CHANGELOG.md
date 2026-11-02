@@ -5,16 +5,21 @@ All notable changes to **Fortuna** are recorded here. The format follows
 tracks the repository's commit count at release time.
 
 Nothing was tagged between the initial release and 1.0.6, so that release
-collects every change in between. Commit hashes and landing dates are noted for
+collects every change in between. Commit hashes and landing dates are noted there for
 traceability.
 
 ## [Unreleased]
+
+## [1.0.12] — 2026-11-01
 
 **To upgrade,** follow "Updating an existing install" in the README: get the new
 files, stop the sidecar, paste the new `fortuna-command.cs` into the action, click
 Compile, then start the sidecar and reload the control page and any OBS docks. The
 self-spin fix needs all of them current. On the old action, a directly attached
-reward does nothing or runs the viewer's text as a command.
+reward does nothing or runs the viewer's text as a command. Updating doesn't remove a
+Set Argument for `command` or `value` you added inside `Fortuna Command`, which the
+old header suggested for Stream Deck. Delete it and use a separate action: a fixed
+`command` of `spin` still spins the wheel on any viewer's `!entry`.
 
 ### Added
 
@@ -88,18 +93,27 @@ reward does nothing or runs the viewer's text as a command.
 
 ### Documentation
 
-- README: channel point setup, and the `verify` check count brought up to date.
+- README: channel point setup, the `verify` check count brought up to date, and an
+  update step for removing a Set Argument from inside `Fortuna Command`.
 
-Verified offline: `verify` 167/167.
+### Known issues
+
+- **The pointer can end up on a slice other than the winner the card names.** This
+  can happen if the list changes during a spin or while the card is showing. It
+  happens every time `removeOnDraw`, `removeAfter` or `removeDrawn` takes the winner
+  off while the card is showing and other entries remain. The card's winner is the
+  real result. This predates this release, and a fix is in progress.
+
+Verified offline: `verify` 167/167, `verify:render` 15/15.
 
 Verified live on Streamer.bot 1.0.7 and a Twitch Affiliate channel, with the action
 and sidecar at `bf7b5de`:
 
-- A real redeem spins once, and so does a Skip Queue reward. Approving or rejecting
-  a redeem is ignored, and the log shows `__source` as
+- A real redeem spins once, and so does a redeem with Skip Queue turned on. Approving
+  or rejecting a redeem is ignored, and the log shows `__source` as
   `TwitchRewardRedemptionUpdated` with `fulfilled` or `canceled`.
-- A command on cooldown is ignored. Streamer.bot exempts the broadcaster account from
-  cooldowns, so testing this takes a second account.
+- A command on cooldown is ignored. This ran from a second account, because
+  Streamer.bot's docs say the broadcaster account is always exempt from cooldowns.
 - `!wheel __status {}` from chat is refused.
 - The `addEntry` crash message from chat leaves the sidecar running with no entry
   added.
@@ -110,11 +124,12 @@ and control page shapes behave as designed over DoAction; a real chat trigger's
 `__source` reads as the event type's name; and a real Set Argument `command` = `spin`
 left the wheel idle with no loop.
 
-Not yet verified live: a redeem during a broadcast, the other crash paths
-(`setEntries`, `setTag`, `openEntries`), and Kick. The control page escaping was
-checked in a browser against the mock, not on Streamer.bot. A U+FEFF before `__status`
-didn't reach Streamer.bot from Twitch chat, so it only ran through DoAction in the chat
-trigger's shape, where it stayed an unknown command.
+Not yet verified live: a redeem during a broadcast, from a viewer's account or with
+typed text; the other crash paths (`setEntries`, `setTag`, `openEntries`); and Kick.
+The control page escaping was checked in a browser against the mock, not on
+Streamer.bot. No chat message carrying a real U+FEFF before `__status` reached
+Streamer.bot, so it only ran through DoAction in the chat trigger's shape, where it
+stayed an unknown command.
 
 ## [1.0.6] — 2026-07-29
 
@@ -158,5 +173,6 @@ Initial release — Wheel of Fate randomizer overlay for Streamer.bot.
 
 Verified offline: `verify` 49/49, `verify:render` 11/11.
 
-[Unreleased]: https://github.com/FlashGalatine/fortuna-wheel/compare/bd40cf7...main
+[Unreleased]: https://github.com/FlashGalatine/fortuna-wheel/compare/006e53b...main
+[1.0.12]: https://github.com/FlashGalatine/fortuna-wheel/compare/bd40cf7...006e53b
 [1.0.6]: https://github.com/FlashGalatine/fortuna-wheel/compare/7b030f7...bd40cf7
