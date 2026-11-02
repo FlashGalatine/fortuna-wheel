@@ -10,12 +10,18 @@ traceability.
 
 ## [Unreleased]
 
+### Documentation
+
+- Setup and update steps said to click Compile, which only tests the code. A reader
+  who stopped there kept the old action. They now say Save and Compile, including in
+  the 1.0.12 notes below.
+
 ## [1.0.12] — 2026-11-01
 
 **To upgrade,** follow "Updating an existing install" in the README: get the new
 files, stop the sidecar, paste the new `fortuna-command.cs` into the action, click
-Compile, then start the sidecar and reload the control page and any OBS docks. The
-self-spin fix needs all of them current. On the old action, a directly attached
+Save and Compile, then start the sidecar and reload the control page and any OBS
+docks. The self-spin fix needs all of them current. On the old action, a directly attached
 reward does nothing or runs the viewer's text as a command. Updating doesn't remove a
 Set Argument for `command` or `value` you added inside `Fortuna Command`, which the
 old header suggested for Stream Deck. Delete it and use a separate action: a fixed
@@ -173,6 +179,6 @@ Initial release — Wheel of Fate randomizer overlay for Streamer.bot.
 
 Verified offline: `verify` 49/49, `verify:render` 11/11.
 
-[Unreleased]: https://github.com/FlashGalatine/fortuna-wheel/compare/006e53b...main
-[1.0.12]: https://github.com/FlashGalatine/fortuna-wheel/compare/bd40cf7...006e53b
+[Unreleased]: https://github.com/FlashGalatine/fortuna-wheel/compare/c0ff3a2...main
+[1.0.12]: https://github.com/FlashGalatine/fortuna-wheel/compare/bd40cf7...c0ff3a2
 [1.0.6]: https://github.com/FlashGalatine/fortuna-wheel/compare/7b030f7...bd40cf7
