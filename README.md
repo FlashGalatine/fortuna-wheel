@@ -103,12 +103,13 @@ action, as described below.
    *Compile* alone only tests the code and doesn't save it.
 4. If you added a *Set Argument* for `command` or `value` inside `Fortuna Command`,
    delete it and use a separate action, as described below. Updating doesn't remove it.
-5. Start the sidecar again, and reload the control page and any OBS docks.
+5. Start the sidecar again, reload the control page and any OBS docks, and refresh
+   the wheel's browser source.
 
 **Set a cooldown of at least 10 seconds on a spin reward** (in its Twitch
 settings). A spin takes up to about 8 seconds, and a redeem is refused while the
 wheel is spinning or empty, but the viewer still loses the points. A redeem also
-closes an open viewer drawing, because nobody can join mid-spin.
+closes an open viewer drawing when the spin starts.
 
 **A reward that should do something else, or a Stream Deck button,** gets its own
 action: *Set Argument* `command` (and `value` if needed), then *Run Action*
@@ -142,7 +143,10 @@ launches harmless.
 1. Add entries on the control page (or `setEntries` your own list) and tag them.
 2. **SPIN.** The result card pops with the tag's effect. “Remove it from the
    wheel” appears under the last draw; or tick *remove the drawn entry
-   afterwards* / the always-on setting for elimination-style wheels.
+   afterwards* / the always-on setting for elimination-style wheels. The wheel
+   stays on the winner until the next change to it, which clears the card and shows
+   the current list. A viewer's `!entry` or a drawing closing itself doesn't count.
+   Changes made during a spin go on the next wheel.
 3. **Viewer drawings**: set max entries and/or a time window, click *Open
    entries*, and chat joins with `!entry`. When it fills up or times out the
    Spin button pulses — the spin itself stays in your hands.
@@ -151,11 +155,12 @@ launches harmless.
 
 - `npm start` — mock Streamer.bot (HTTP :7474 + WS :8080) with a landing page;
   `/mock/fixture` broadcasts a sample wheel, POST `/mock/push` any payload.
-- `npm run verify` — 229 offline checks: spin math determinism, the real
+- `npm run verify` — 284 offline checks: spin math determinism, the real
   panel-core against the mock (subscribe case, sync replay, serialized queue),
   HTTP maps, the mock's copy of the action's mapping, a real sidecar E2E (entry CRUD,
-  `!entry` dedupe/limits, spin lifecycle, channel point redeems, hostile chat JSON,
-  restart persistence, config saves under a burst, a kill, a stalled write and a held
+  `!entry` dedupe/limits, spin lifecycle, list changes during a spin, channel point
+  redeems, the Drawing ready flag and error note, hostile chat JSON, restart
+  persistence, config saves under a burst, a kill, a stalled write and a held
   file, starts on a config that's damaged, can't be read or has no entries list), and
   the real `fortuna-command.cs` against a stub `CPH`. Those last 43
   need the .NET Framework's `csc.exe` and are reported as skipped without it; they
@@ -163,7 +168,8 @@ launches harmless.
   (7478/8084/7494) so it runs beside a live SB.
 - `npm run verify:render` — real-pixel checks in a system Edge/Chrome
   (`npm i --no-save playwright-core` first): painted wheel, revealed draw with
-  confetti on the fx layer, control page. Writes gitignored PNGs.
+  confetti on the fx layer, control page, and where the pointer stops with the real
+  sidecar running. Writes gitignored PNGs.
 - `npm run shots` — regenerates the docs screenshots.
 
 ## Ports
