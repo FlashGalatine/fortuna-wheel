@@ -1967,6 +1967,21 @@ async function sidecarChecks(cfgDir) {
   check('sidecar: a closed stderr doesn\'t end the process or raise a note', pipedErr.exitCode === null && sidecarProc === pipedErr
     && !client.events.slice(atStderr).some((d) => isStatus(d) && parseStatus(d).lastError.includes('failed:')), `exit code ${pipedErr.exitCode}`);
 
+  // The save loop's own log line throws while a file is held. Saves must carry on once it's free.
+  if (process.platform === 'win32') {
+    await reboot(savedConfig, faultsOn({ FORTUNA_THROW_ON: 'Could not persist config' }));
+    holdConfig(cfgPath);
+    const atLogHeld = mark();
+    cmd('addEntry', 'Saved despite the log');
+    const sLogHeld = await since(atLogHeld, (d) => isStatus(d) && parseStatus(d).lastError.includes('could not save config.json'), 8000);
+    releaseConfig();
+    const savedLogHeld = await savedWhen((c) => c.entries?.some((e) => e.label === 'Saved despite the log'), 20000);
+    check('sidecar: a throw from the save loop\'s log line doesn\'t stop saves', !!sLogHeld && !!savedLogHeld, sLogHeld?.value);
+  } else {
+    skipped += 1;
+    console.log('  - skipped: only Windows refuses to replace a held file');
+  }
+
   // With no wheel up yet there's nothing to keep running, so a failed startup still ends it.
   const badStart = spawnSync(process.execPath, [resolve(__dirname, 'fortuna-sidecar.mjs')], {
     env: { ...process.env, SB_WS_URL: WS_URL, FORTUNA_CONFIG: cfgPath, FORTUNA_GUARD_PORT: '70000' }, encoding: 'utf-8', timeout: 5000,

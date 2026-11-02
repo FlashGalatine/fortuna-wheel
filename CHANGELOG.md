@@ -140,7 +140,7 @@ fix is partly in the overlay.
   has no wheel of its own, it never sends `setEntries`, `spin` stays non-null after the
   first draw, and an unknown command or an ignored `entry` gets no status back.
 
-Verified offline: `verify` 397/397, with its ten held-file checks on Windows only
+Verified offline: `verify` 398/398, with its eleven held-file checks on Windows only
 (reported as skipped elsewhere), and `verify:render` 31/31. Closing the console
 window is tested by delivering its signal inside the process, not by closing a real
 window. Not run on a live Streamer.bot.

@@ -323,7 +323,7 @@ async function runSaves() {
       saveDirty = true;
       if (retryMs >= FILE_RETRY_WARN_MS && !saveNote) {
         saveNote = `could not save config.json (${err.code ?? 'error'}), still trying: is another program holding it?`;
-        log(`Could not persist config, still trying: ${err.message}`);
+        try { log(`Could not persist config, still trying: ${err.message}`); } catch { /* the note is the record */ }
         try { pushStatus(); } catch { /* the log line is the record */ }
       }
       await sleep(retryMs);

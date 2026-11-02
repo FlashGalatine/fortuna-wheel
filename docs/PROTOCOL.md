@@ -136,7 +136,8 @@ click. Follow the same rule from Stream Deck and chat macros.
 Status must never clobber the persisted update payload, so it rides the
 `Fortuna Command` relay as reserved command `__status` with the JSON in `value`
 (no third SB action). Sent after a state change, after a command that fails, after a
-`setSettings` that changes nothing, and when the sidecar connects. An unknown command
+`setSettings` that changes nothing, when saves start or stop failing, after a throw
+nothing else caught, and when the sidecar connects. An unknown command
 and an ignored `entry` (closed window or duplicate) send none. Send `status` to force a
 snapshot; the control page probes every 10 seconds.
 
