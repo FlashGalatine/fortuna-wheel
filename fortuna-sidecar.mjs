@@ -1,17 +1,18 @@
 // Fortuna sidecar — the one Node process. Owns the wheel: the entry list, the
 // viewer-entry window, and — critically — the spin decision. The winner and the
-// spin parameters are picked HERE, once, and broadcast; every overlay and the
-// control page derive the identical animation from them, so all surfaces agree.
+// spin parameters are picked HERE, once, and broadcast; every overlay derives the
+// identical animation from them, so all OBS sources agree.
 //
 //   outbound  on every state change → DoAction "Fortuna Push" with the
 //             pre-serialized `fortunaPayload` (docs/PROTOCOL.md); the C# action
 //             persists it to the `fortuna.payload` global and broadcasts it.
-//             After every command → a fortuna:status snapshot for the control
-//             page. Status is ephemeral and must not clobber the persisted
-//             update payload, so it rides the "Fortuna Command" relay as the
-//             reserved command "__status" (value = status JSON); the control
-//             page unwraps it and the sidecar ignores its own echo. No third SB
-//             action needed.
+//             After a state change or a failed command → a fortuna:status
+//             snapshot for the control page. An unknown command and an ignored
+//             "entry" send none. Status is ephemeral and must not clobber the
+//             persisted update payload, so it rides the "Fortuna Command" relay
+//             as the reserved command "__status" (value = status JSON); the
+//             control page unwraps it and the sidecar ignores its own echo. No
+//             third SB action needed.
 //   inbound   subscribes to General.Custom and consumes
 //             { type:'fortuna:command', command, value, user?, userId? }
 //             broadcasts emitted by the control page, chat triggers and reward
@@ -52,6 +53,10 @@ const GUARD_PORT = Number(process.env.FORTUNA_GUARD_PORT) || 7493;
 const MAX_ENTRIES = 200;
 const LABEL_MAX_CHARS = 80;
 const TAGS = ['good', 'bad', 'neutral'];
+// What newId('e') makes. A saved id has to look like this to be kept: findEntry trims its
+// key, so a blank or padded id could never match, and it tries ids first, so an id like
+// "Alpha" would catch removal by another entry's label.
+const ENTRY_ID = /^e_[\w-]{1,40}$/;
 const REVEAL_GRACE_MS = 300; // reveal broadcast lands after every client's animation finished
 const FILE_RETRY_MIN_MS = 50;
 const FILE_RETRY_MAX_MS = 5000;
@@ -138,8 +143,7 @@ async function loadConfig() {
 async function keepConfigCopy(problem) {
   try {
     const copyPath = await copyConfigAside();
-    loadNote = `${problem}, so the wheel started empty. A copy is kept as ${basename(copyPath)}.`;
-    log(loadNote);
+    addLoadNote(`${problem}, so the wheel started empty. A copy is kept as ${basename(copyPath)}.`);
   } catch (copyErr) {
     log(`Could not copy config: ${copyErr.message}`);
     holdSaves(`${problem} and no copy could be made (${copyErr.code ?? 'error'}), so the wheel started empty and nothing will be saved over it. Fix the file and restart the sidecar.`);
@@ -187,17 +191,27 @@ async function waitWhileBusy(attempt, what) {
 // For the rest of this run, the file on disk may be the only copy of the wheel.
 function holdSaves(note) {
   savesHeld = true;
-  loadNote = note;
+  addLoadNote(note);
+}
+
+// A file can have more than one thing wrong with it: a bad saved draw is noted while the config
+// is adopted, and a missing entries list after that. Each note may be the only word of it.
+function addLoadNote(note) {
+  loadNote = loadNote ? `${loadNote} · ${note}` : note;
   log(note);
 }
 
 function adoptConfig(parsed) {
   if (!parsed || typeof parsed !== 'object') return;
+  const rows = (Array.isArray(parsed.entries) ? parsed.entries : [])
+    .map((raw) => ({ savedId: raw?.id, entry: normalizeEntry(raw) }))
+    .filter((row) => row.entry)
+    .slice(0, MAX_ENTRIES);
+  const entries = uniqueIds(rows.map((row) => row.entry));
+  const lastSpin = normalizeSpin(parsed.lastSpin);
+  if (lastSpin) pointWinnerAtRow(lastSpin, parsed.lastSpin.selectedEntry.id, rows);
   config = {
-    entries: (Array.isArray(parsed.entries) ? parsed.entries : [])
-      .map(normalizeEntry)
-      .filter(Boolean)
-      .slice(0, MAX_ENTRIES),
+    entries,
     entryMode: {
       // The entry window never survives a restart open — its timer died with the
       // old process, and silently collecting entries forever would be worse.
@@ -207,12 +221,24 @@ function adoptConfig(parsed) {
       openedAt: null,
     },
     settings: {
-      removeOnDraw: !!parsed.settings?.removeOnDraw,
+      removeOnDraw: parsed.settings?.removeOnDraw === true || parsed.settings?.removeOnDraw === 'true',
       defaultChatTag: TAGS.includes(parsed.settings?.defaultChatTag) ? parsed.settings.defaultChatTag : 'good',
     },
-    lastSpin: normalizeSpin(parsed.lastSpin),
+    lastSpin,
     revision: clampInt(parsed.revision, 0, Number.MAX_SAFE_INTEGER, 0),
   };
+}
+
+// normalizeEntry and uniqueIds can give a saved row a new id, and the saved winner has to
+// follow it or removeDrawn takes the wrong row or none. A row matches on the id and label
+// both were saved with, and selectedIndex settles a tie. A winner with no match can't hold a
+// row's id, or removeDrawn takes that row, so it gets a new one and removeDrawn refuses. A row
+// renamed by hand refuses too, which is the safe way to fail.
+function pointWinnerAtRow(spin, savedId, rows) {
+  const matches = rows.filter((row) => row.savedId === savedId && row.entry.label === spin.selectedEntry.label);
+  const row = matches.find((match) => match === rows[spin.selectedIndex]) ?? matches[0];
+  if (row) { spin.selectedEntry.id = row.entry.id; return; }
+  while (rows.some((other) => other.entry.id === spin.selectedEntry.id)) spin.selectedEntry.id = newId('e');
 }
 
 function normalizeEntry(e) {
@@ -220,7 +246,7 @@ function normalizeEntry(e) {
   const label = (textOf(e.label) ?? '').trim().slice(0, LABEL_MAX_CHARS);
   if (!label) return null;
   const out = {
-    id: typeof e.id === 'string' && e.id ? e.id : newId('e'),
+    id: typeof e.id === 'string' && ENTRY_ID.test(e.id) ? e.id : newId('e'),
     label,
     tag: TAGS.includes(e.tag) ? e.tag : 'neutral',
     source: e.source === 'chat' ? 'chat' : 'streamer',
@@ -232,11 +258,43 @@ function normalizeEntry(e) {
   return out;
 }
 
+// Removal goes by id, so a list needs each id once: the first holder keeps it. A list of
+// generated ids needs this too. Rows normalized in the same millisecond differ only by
+// newId's random part, which a 200-row list repeats about 1 time in 85.
+function uniqueIds(entries) {
+  const seen = new Set();
+  for (const e of entries) {
+    while (seen.has(e.id)) e.id = newId('e');
+    seen.add(e.id);
+  }
+  return entries;
+}
+
 // Only a completed spin is worth restoring; a half-finished one is meaningless
-// after a restart (its reveal timer is gone).
+// after a restart (its reveal timer is gone). It gets replayed to every overlay, whose
+// arithmetic on these fields throws on an object, so one bad field drops the whole block.
+// A save only ever writes null or a revealed spin, so null or no block means no draw yet, and
+// anything else is a hand edit. The next save overwrites it, so the log and the note say which
+// field, or lastSpin for a block that isn't one. A field this doesn't check goes back out as
+// it came.
 function normalizeSpin(s) {
-  if (!s || typeof s !== 'object' || s.state !== 'revealed' || !s.selectedEntry) return null;
-  return s;
+  if (s == null) return null;
+  const selectedEntry = normalizeEntry(s.selectedEntry);
+  const { state, spinId, entryCount, selectedIndex, seed, startedAt, durationMs, extraSpins } = s;
+  const bad = typeof s !== 'object' || Array.isArray(s) ? 'lastSpin'
+    : state !== 'revealed' ? 'state'
+    : !spinId || typeof spinId !== 'string' ? 'spinId'
+    : !(Number.isInteger(entryCount) && entryCount >= 1 && entryCount <= MAX_ENTRIES) ? 'entryCount'
+    : !(Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < entryCount) ? 'selectedIndex'
+    : !selectedEntry ? 'selectedEntry'
+    : !Number.isFinite(seed) ? 'seed'
+    : typeof startedAt !== 'string' || Number.isNaN(Date.parse(startedAt)) ? 'startedAt'
+    : !(Number.isFinite(durationMs) && durationMs > 0) ? 'durationMs'
+    : !Number.isFinite(extraSpins) ? 'extraSpins'
+    : null;
+  if (!bad) return { ...s, selectedEntry };
+  addLoadNote(`config.json: the saved last draw has a bad ${bad}, so it was dropped`);
+  return null;
 }
 
 // One save runs at a time. A change during a save only marks the config dirty, and the loop then
@@ -265,7 +323,7 @@ async function runSaves() {
       saveDirty = true;
       if (retryMs >= FILE_RETRY_WARN_MS && !saveNote) {
         saveNote = `could not save config.json (${err.code ?? 'error'}), still trying: is another program holding it?`;
-        log(`Could not persist config, still trying: ${err.message}`);
+        try { log(`Could not persist config, still trying: ${err.message}`); } catch { /* the note is the record */ }
         try { pushStatus(); } catch { /* the log line is the record */ }
       }
       await sleep(retryMs);
@@ -384,14 +442,19 @@ function pushStatus() {
   doAction('Fortuna Command', { command: '__status', value: json, fortunaCommand: '__status', fortunaValue: json });
 }
 
+// What every new revision brings, for applyChange and for later()'s catch, which can't call it.
 // keepReveal: a viewer joining or a drawing closing itself isn't anyone moving on from the
 // result, so a reveal on show stays on show.
-function applyChange(keepReveal = false) {
+function raiseRevision(keepReveal = false) {
   if (!config.entries.length) entriesReady = false; // nothing left to spin, however it emptied
   if (keepReveal && config.lastSpin?.revealRevision === config.revision) config.lastSpin.revealRevision = config.revision + 1;
   config.revision++;
   // Only a reveal on show paints its frozen slices. After that they'd just ride along in every update.
   if (config.lastSpin?.segments && config.lastSpin.revealRevision !== config.revision) delete config.lastSpin.segments;
+}
+
+function applyChange(keepReveal = false) {
+  raiseRevision(keepReveal);
   persist();
   pushUpdate();
   pushStatus();
@@ -408,6 +471,36 @@ function fail(msg) {
   noteError(msg);
   log(msg);
   pushStatus();
+}
+
+// The backstop: a throw is logged and dropped, though it may leave its work half applied.
+// The note carries the error because a hidden launch has no log to read.
+function noteThrow(what, err) {
+  noteError(`${what} failed: ${err?.message ?? err}`, true);
+  // Only the stack's frame lines: its first line repeats the message, which can quote a value.
+  try {
+    log(`${lastError}${err?.name ? ` (${err.name})` : ''}`, String(err?.stack ?? '').split('\n').filter((line) => /^\s+at /.test(line)));
+  } catch { /* the note is the record */ }
+  try { pushStatus(); } catch { /* the log line is the record */ }
+}
+
+// setTimeout for the part of a command that runs later, where the try/catch around
+// dispatch can't see it. A throw here got part way, so the surfaces still hear the state
+// it reached, which the process-level backstop wouldn't tell them.
+function later(what, ms, fn) {
+  return setTimeout(() => {
+    const revision = config.revision;
+    try { fn(); } catch (err) {
+      // fn may have raised the revision before it threw, and one change counts once. With no
+      // keepReveal here, a throw in a timed close ends a reveal on show. No known input reaches that.
+      try {
+        if (config.revision === revision) raiseRevision();
+        persist();
+        pushUpdate();
+      } catch { /* noteThrow still reports it */ }
+      noteThrow(what, err);
+    }
+  }, ms);
 }
 
 // ── Entry management ──────────────────────────────────────────────────────────
@@ -441,7 +534,7 @@ function chatEntry(user, userId) {
   if (chatCount >= config.entryMode.maxEntries) { closeEntryWindow('full'); return; }
   const entry = addEntry({ label: name, tag: config.settings.defaultChatTag, source: 'chat', user: name, userId });
   if (!entry) return;
-  log(`chat entry: ${name} (${config.entries.filter((e) => e.source === 'chat').length}/${config.entryMode.maxEntries})`);
+  log(`chat entry: ${entry.label} (${config.entries.filter((e) => e.source === 'chat').length}/${config.entryMode.maxEntries})`);
   if (config.entries.filter((e) => e.source === 'chat').length >= config.entryMode.maxEntries) {
     closeEntryWindow('full');
   } else {
@@ -459,7 +552,7 @@ function openEntryWindow(opts) {
   entriesReady = false;
   if (windowTimer) { clearTimeout(windowTimer); windowTimer = null; }
   if (config.entryMode.windowSec > 0) {
-    windowTimer = setTimeout(() => { windowTimer = null; closeEntryWindow('time'); }, config.entryMode.windowSec * 1000);
+    windowTimer = later("an entry window's close", config.entryMode.windowSec * 1000, () => { windowTimer = null; closeEntryWindow('time'); });
   }
   log(`entries OPEN (max ${config.entryMode.maxEntries}${config.entryMode.windowSec ? `, ${config.entryMode.windowSec}s window` : ''})`);
   applyChange();
@@ -507,22 +600,24 @@ function spin(opts) {
     extraSpins: 4 + (seed % 4),
     state: 'spinning',
   };
+  // Armed before anything that can throw. Only reveal() clears activeSpin, and a spin
+  // that never reveals would refuse every later spin.
+  revealTimer = later("a spin's reveal", activeSpin.durationMs + REVEAL_GRACE_MS, () => {
+    revealTimer = null;
+    reveal(removeAfter);
+  });
   entriesReady = false;
   log(`SPIN → [${selectedIndex}] "${activeSpin.selectedEntry.label}" (${activeSpin.selectedEntry.tag}), ${activeSpin.durationMs}ms, ${activeSpin.extraSpins} turns${removeAfter ? ', remove after' : ''}`);
   applyChange();
-
-  revealTimer = setTimeout(() => {
-    revealTimer = null;
-    reveal(removeAfter);
-  }, activeSpin.durationMs + REVEAL_GRACE_MS);
 }
 
 function reveal(removeAfter) {
   if (!activeSpin) return;
   // The revision applyChange() below gives this reveal. Once the wheel's revision passes it,
-  // the wheel has moved on and the overlay stops showing it.
+  // the wheel has moved on and the overlay stops showing it. If something below throws first,
+  // later()'s catch raises the revision to the same number, so the reveal still stays on show.
   config.lastSpin = { ...activeSpin, state: 'revealed', revealRevision: config.revision + 1 };
-  activeSpin = null;
+  activeSpin = null; // before anything that can throw, so the next spin isn't refused
   if (removeAfter) removeEntryById(config.lastSpin.selectedEntry.id);
   log(`REVEALED "${config.lastSpin.selectedEntry.label}"${removeAfter ? ' (removed from wheel)' : ''}`);
   applyChange();
@@ -541,7 +636,7 @@ const NOT_OPERATOR_COMMANDS = ['entry', 'status'];
 
 function dispatch(command, value, user, userId) {
   if (command === '__status') return; // our own status relay echoing back
-  log(`command: ${command}${value ? ' ' + value.slice(0, 120) : ''}${user ? ` (from ${user})` : ''}`);
+  log(`command: ${command.slice(0, 120)}${value ? ' ' + value.slice(0, 120) : ''}${user ? ` (from ${user.slice(0, 60)})` : ''}`);
   // The note is the only record on a hidden launch, so chat can't clear it, only the next
   // operator command with no user behind it. No user just means it didn't come from chat: a
   // control page click, but also a timed action, which nobody may be watching. If the command
@@ -552,7 +647,7 @@ function dispatch(command, value, user, userId) {
   switch (command) {
     case 'addEntry': {
       // JSON {label, tag} from the control page, or plain chat text
-      // ("!wheel add Run it back | bad" — an optional trailing "| tag").
+      // ("!wheel addEntry Run it back | bad" — an optional trailing "| tag").
       const o = parseJson(value);
       let label, tag;
       if (o && typeof o === 'object') { label = o.label; tag = o.tag; }
@@ -590,13 +685,13 @@ function dispatch(command, value, user, userId) {
       applyChange();
       return;
     }
-    // Batched full-list replace — the control page sends ONE of these per save so
-    // it never fires a burst of DoActions (Streamer.bot bleeds arguments between
-    // action invocations that arrive within a few ms).
+    // Batched full-list replace — a caller sends ONE of these instead of a burst of
+    // DoActions (Streamer.bot bleeds arguments between action invocations that arrive
+    // within a few ms).
     case 'setEntries': {
       const arr = parseJson(value);
       if (!Array.isArray(arr)) { fail('setEntries: expected a JSON array'); return; }
-      const entries = arr.map(normalizeEntry).filter(Boolean).slice(0, MAX_ENTRIES);
+      const entries = uniqueIds(arr.map(normalizeEntry).filter(Boolean).slice(0, MAX_ENTRIES));
       // [] clears the wheel on purpose. A list with nothing usable in it must not.
       if (arr.length && !entries.length) { fail('setEntries: no usable entries'); return; }
       config.entries = entries;
@@ -615,18 +710,24 @@ function dispatch(command, value, user, userId) {
     }
     case 'setSettings': {
       const o = parseJson(value);
+      const before = JSON.stringify(config.settings);
       if (o && typeof o === 'object') {
         if (o.removeOnDraw !== undefined) config.settings.removeOnDraw = o.removeOnDraw === true || o.removeOnDraw === 'true';
         if (o.defaultChatTag !== undefined && TAGS.includes(o.defaultChatTag)) config.settings.defaultChatTag = o.defaultChatTag;
       }
-      persist();
+      // Not applyChange: the wheel itself hasn't changed, so the revision stays and a reveal on
+      // show stays with it. A new value still has to reach the replay.
+      if (JSON.stringify(config.settings) !== before) {
+        persist();
+        pushUpdate();
+      }
       pushStatus();
       return;
     }
     case 'status': pushStatus(); return;
     default:
       [lastError, lastErrorAt, lastErrorThrew] = noteBefore; // an unknown command doesn't count
-      log(`unknown command "${command}" — ignored`);
+      log(`unknown command "${command.slice(0, 120)}" — ignored`);
   }
 }
 
@@ -656,23 +757,18 @@ function connectSb() {
       if (!(m && m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
       let d = m.data;
       if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
-      // Echo-loop guard: this client also hears its own fortuna:update /
-      // fortuna:status broadcasts. Consume ONLY the command channel.
+      // Echo-loop guard: this client also hears its own fortuna:update broadcasts.
+      // Consume ONLY the command channel. Its own status arrives there too, as
+      // "__status", and dispatch() drops it.
       if (!d || typeof d !== 'object' || d.type !== 'fortuna:command') return;
-      // The backstop: a throw while handling a command is logged and dropped, though it may
-      // leave that command half applied. The timers a command arms (a spin's reveal, an entry
-      // window's close) run outside it, so a throw there still ends the process, though no
-      // known input causes one. The note carries the error because a hidden launch has no
-      // log to read. The String() calls belong inside it. The action only relays strings, so
-      // a field that throws here marks a bad relay, and running it with that field blank could
-      // do harm: clearEntries reads a blank value as "all". A field that doesn't throw, like
-      // {} or [], still converts and runs, as it always has.
+      // The String() calls belong inside the try. The action only relays strings, so a field
+      // that throws here marks a bad relay, and running it with that field blank could do
+      // harm: clearEntries reads a blank value as "all". A field that doesn't throw, like {}
+      // or [], still converts and runs, as it always has.
       try {
         dispatch(String(d.command ?? ''), String(d.value ?? ''), d.user == null ? '' : String(d.user), d.userId == null ? '' : String(d.userId));
       } catch (err) {
-        noteError(`a command failed: ${err?.message ?? err}`, true);
-        log(`${lastError}\n${err?.stack ?? err}`);
-        try { pushStatus(); } catch { /* the log line is the record */ }
+        noteThrow('a command', err);
       }
     });
   } catch {
@@ -695,14 +791,28 @@ function doAction(name, args) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-function log(msg) {
-  console.log(`[${new Date().toISOString()}] [fortuna] ${msg}`);
+// One call is one physical line, plus a stack's frame lines. Viewer text can hold newlines and
+// terminal escapes (JSON "\n" and "\u001b" decode into a label), and a forged line would look
+// genuine, so control characters print escaped everywhere, frame lines included. So do Unicode
+// direction controls, which can reorder how a line displays.
+function log(msg, frames = []) {
+  const printable = (text) => String(text).replace(/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  console.log(`[${new Date().toISOString()}] [fortuna] ${printable(msg)}${frames.map((frame) => `\n${printable(frame)}`).join('')}`);
 }
+
+// A closed stdout or stderr (the reader of a "| tee" exited, or a launcher left node running)
+// fails the write on a later tick, past any try/catch. Unhandled, the error loops through the
+// backstop, whose own log line fails the same way, and floods statuses, thousands in 2 s. The
+// wheel matters more than the log.
+process.stdout.on('error', () => {});
+process.stderr.on('error', () => {});
 
 function acquireGuard() {
   return new Promise((res) => {
-    const guard = createServer();
-    guard.once('error', (err) => {
+    // Nothing talks to this port, it only has to stay bound. So hang up on whatever connects
+    // and ignore how that goes: a reset on the socket isn't a failure worth a note.
+    const guard = createServer((socket) => socket.on('error', () => {}).destroy());
+    guard.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
         log(`Another Fortuna sidecar is already running (guard port :${GUARD_PORT}) — exiting.`);
         process.exit(0);
@@ -718,6 +828,13 @@ async function main() {
   log(`Fortuna sidecar starting (config: ${CONFIG_PATH})`);
   await acquireGuard();
   await loadConfig();
+  // The last stop for whatever nothing above catches, now that there's a wheel to keep up. A
+  // throw before this point still ends the process: it can't do its job anyway.
+  const backstop = (err) => {
+    try { noteThrow('a background task', err); } catch { /* a throw from here would end the process */ }
+  };
+  process.on('uncaughtException', backstop);
+  process.on('unhandledRejection', backstop);
   connectSb();
   const shutdown = async () => {
     log('shutting down');

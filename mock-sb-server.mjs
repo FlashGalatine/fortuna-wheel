@@ -113,7 +113,12 @@ let setArgs = {};
 // ── HTTP server (SB HTTP Server mimic) ───────────────────────────────────────
 const http = createServer(async (req, res) => {
   const url = req.url || '/';
-  const path = decodeURIComponent(url.split('?')[0]);
+  let path;
+  try { path = decodeURIComponent(url.split('?')[0]); } catch {
+    res.writeHead(400, { 'content-type': 'text/plain' });
+    res.end('malformed URL');
+    return;
+  }
 
   if (path === '/mock/set-args' && req.method === 'POST') {
     let body = '';

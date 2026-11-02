@@ -7,8 +7,9 @@
 // the payload's `type`:
 //
 //   fortuna:update  — full wheel payload (detail = the payload object)
-//   fortuna:status  — sidecar status      (detail = the payload object)
-//   fortuna:command — control relay       (consumed by the sidecar, not panels)
+//   fortuna:command — control relay       (detail = the payload object). The sidecar acts
+//                     on commands; the control page reads command "__status", whose value
+//                     is the status JSON (docs/PROTOCOL.md). No top-level fortuna:status is sent.
 //   fortuna:error   — action-side failure (detail = { message })
 //
 // Streamer.bot has no state-on-connect replay. We recreate it: after the

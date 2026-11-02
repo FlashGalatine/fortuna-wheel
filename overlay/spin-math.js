@@ -1,10 +1,10 @@
 // spin-math — the deterministic spin animation math, shared verbatim between
 // the overlay (plain <script>) and verify.mjs (evaluated in Node). The sidecar
 // decides the outcome ONCE ({selectedIndex, seed, durationMs, extraSpins,
-// startedAt}); every surface derives the IDENTICAL animation from those numbers,
-// so multiple OBS sources and the control preview all land on the same slice at
-// the same moment. Nothing here may use Math.random() or Date.now() for the
-// target — only for nothing at all, in fact: it's all pure functions.
+// startedAt}); every overlay derives the IDENTICAL animation from those numbers,
+// so multiple OBS sources all land on the same slice at the same moment. Nothing
+// here may use Math.random() or Date.now() for the target — only for nothing at
+// all, in fact: it's all pure functions.
 
 (function (root) {
   'use strict';

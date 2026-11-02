@@ -152,7 +152,7 @@ page decides everything visual. A complete, working 8-ball:
     const spin = e.detail.spin;
     clearTimeout(timer);
     ball.classList.remove('shaking', 'revealed');
-    if (!spin) return;
+    if (!spin) return;                               // only before the first draw
     const msLeft = Date.parse(spin.startedAt) + spin.durationMs - Date.now();
     if (spin.state === 'spinning' && msLeft > 0) {
       ball.classList.add('shaking');                 // shake for the spin duration
@@ -167,7 +167,7 @@ page decides everything visual. A complete, working 8-ball:
 
 Drop it in `overlay/` (e.g. `eightball.html`), add it as an OBS browser source
 at `http://127.0.0.1:7474/fortuna-overlay/eightball.html`, and it spins — well,
-shakes — in perfect sync with every other Fortuna surface, because all timing
+shakes — in perfect sync with every other OBS source, because all timing
 derives from the shared `spin` block. Use `spin.selectedEntry.tag` if you want
 your own good/bad theatrics.
 

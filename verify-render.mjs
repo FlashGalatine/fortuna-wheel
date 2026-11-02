@@ -262,6 +262,13 @@ try {
     check('wheel: removeAfter leaves the pointer on the winner', onWinner(rRemoved, 8), JSON.stringify(rRemoved));
     await page.screenshot({ path: resolve(__dirname, 'test-render-landing.png') });
 
+    // A setSettings change sends an update at the same revision, so nothing moves.
+    const settled = nextUpdate();
+    await send('setSettings', '{"defaultChatTag":"bad"}');
+    await settled;
+    const rSettings = await resting();
+    check('wheel: a setSettings change leaves the card up and the pointer on the winner', onWinner(rSettings, 8) && rSettings.card === rRemoved.card, JSON.stringify(rSettings));
+
     // The next change ends the reveal: the card goes, and the wheel shows the live list.
     const moved = nextUpdate();
     await send('addEntry', 'Next round');
