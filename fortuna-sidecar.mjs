@@ -22,21 +22,26 @@
 //           status. (docs/PROTOCOL.md has the full table.)
 //
 // State lives in ./config.json (gitignored; seeded from config.example.json on
-// first run) — a restart restores the entries and the last revealed spin.
+// first run) — a restart restores the entries and the last revealed spin. Saves
+// go through config.json.tmp one at a time, so stopping the process at any moment
+// leaves the last whole save.
 //
 // Run:  start-fortuna.bat  ·  npm run sidecar
 // Env:  SB_WS_URL (default ws://127.0.0.1:8080/) · FORTUNA_GUARD_PORT (7493)
 //       FORTUNA_CONFIG (config file path override)
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { copyFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomInt } from 'node:crypto';
 import { createServer } from 'node:net';
-import { resolve, dirname } from 'node:path';
+import { basename, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = process.env.FORTUNA_CONFIG || resolve(__dirname, 'config.json');
+const TEMP_PATH = `${CONFIG_PATH}.tmp`;
+const BAD_PATH = `${CONFIG_PATH}.bad`;
 const EXAMPLE_PATH = resolve(__dirname, 'config.example.json');
 const SB_WS_URL = process.env.SB_WS_URL || `ws://127.0.0.1:${process.env.SB_WS_PORT || 8080}/`;
 // Single-instance guard: a second launch (double-click + SB action) exits
@@ -48,6 +53,10 @@ const MAX_ENTRIES = 200;
 const LABEL_MAX_CHARS = 80;
 const TAGS = ['good', 'bad', 'neutral'];
 const REVEAL_GRACE_MS = 300; // reveal broadcast lands after every client's animation finished
+const FILE_RETRY_MIN_MS = 50;
+const FILE_RETRY_MAX_MS = 5000;
+const FILE_RETRY_WARN_MS = 1000; // a wait this long is more than a scanner passing by, so say so
+const SHUTDOWN_SAVE_WAIT_MS = 2000;
 
 let config = {
   entries: [], // { id, label, tag, source: 'streamer'|'chat', user? , userId? }
@@ -63,6 +72,13 @@ let windowTimer = null;
 let entriesReady = false; // viewer drawing filled up / timed out — control page highlights Spin
 let lastError = '';
 
+let saveDirty = false; // the config changed since the last save started
+let saveLoop = null; // the running save loop, if any; there is only ever one
+let saveNote = ''; // what the control page also shows while saves keep failing
+let loadNote = ''; // what it also shows about how config.json loaded; only a restart ends this one
+let savesHeld = false; // config.json couldn't be read or copied, so nothing may replace it this run
+let tempText = null; // what config.json.tmp holds after a refused rename, so a retry can reuse it
+
 let sbWs = null;
 let sbReconnectTimer = null;
 let sbMsgId = 0;
@@ -70,23 +86,107 @@ let sbMsgId = 0;
 // ── Config ────────────────────────────────────────────────────────────────────
 
 async function loadConfig() {
-  let raw = null;
+  // A temp file here is a save that a stopped process never finished. It never became the
+  // config, so it's only in the way.
+  await rm(TEMP_PATH, { force: true }).catch(() => {});
+  let raw;
   try {
-    raw = await readFile(CONFIG_PATH, 'utf-8');
+    raw = await readConfigFile();
   } catch (err) {
-    if (err.code !== 'ENOENT') log(`Could not read config: ${err.message}`);
+    log(`Could not read config: ${err.message}`);
+    holdSaves(`could not read config.json (${err.code ?? 'error'}), so the wheel started empty and nothing will be saved over it. Fix the file and restart the sidecar.`);
+    return;
   }
-  if (raw == null) {
+  const seeding = raw == null; // the example holds no wheel of the streamer's to protect
+  if (seeding) {
     try {
       raw = await readFile(EXAMPLE_PATH, 'utf-8');
-      await writeFile(CONFIG_PATH, raw, 'utf-8');
-      log('Seeded config.json from config.example.json');
     } catch {
       log('No config.example.json — using built-in defaults');
       return;
     }
+    try {
+      await writeConfigFile(raw);
+      log('Seeded config.json from config.example.json');
+    } catch (err) {
+      log(`Could not seed config.json from config.example.json: ${err.message}`);
+    }
   }
-  try { adoptConfig(JSON.parse(raw)); } catch (err) { log(`Bad config JSON: ${err.message}`); }
+  try {
+    // An editor's byte order mark is harmless, but JSON.parse refuses it.
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, ''));
+    // Valid JSON that isn't a wheel would read as an empty one, and the next save would replace it.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || (parsed.entries !== undefined && !Array.isArray(parsed.entries))) {
+      throw new Error('not a config object with a list of entries');
+    }
+    // [] is an empty wheel on purpose. A list with nothing usable in it isn't, as in setEntries.
+    if (!seeding && parsed.entries?.length && !parsed.entries.some(normalizeEntry)) {
+      throw new Error('an entries list with nothing usable in it');
+    }
+    adoptConfig(parsed);
+    // A settings-only file is allowed, but a misspelled key reads the same.
+    if (!seeding && parsed.entries === undefined) await keepConfigCopy('no entries list was found in config.json');
+  } catch (err) {
+    log(`Bad config JSON: ${err.message}`);
+    await keepConfigCopy('config.json was damaged');
+  }
+}
+
+// The next save replaces this file, and it may be the only copy of the streamer's wheel.
+async function keepConfigCopy(problem) {
+  try {
+    const copyPath = await copyConfigAside();
+    loadNote = `${problem}, so the wheel started empty. A copy is kept as ${basename(copyPath)}.`;
+    log(loadNote);
+  } catch (copyErr) {
+    log(`Could not copy config: ${copyErr.message}`);
+    holdSaves(`${problem} and no copy could be made (${copyErr.code ?? 'error'}), so the wheel started empty and nothing will be saved over it. Fix the file and restart the sidecar.`);
+  }
+}
+
+// Null only when the file isn't there. Any other failure means the wheel may still be in it, so
+// starting blank or seeding would overwrite it with the next save.
+async function readConfigFile() {
+  try {
+    return await waitWhileBusy(() => readFile(CONFIG_PATH, 'utf-8'), 'Could not read config');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+// The first free name, so a copy that may hold the only good wheel never gets replaced.
+async function copyConfigAside() {
+  for (let n = 0; ; n++) {
+    const copyPath = n ? `${BAD_PATH}.${n}` : BAD_PATH;
+    try {
+      await waitWhileBusy(() => copyFile(CONFIG_PATH, copyPath, constants.COPYFILE_EXCL), 'Could not copy config');
+      return copyPath;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+  }
+}
+
+// EBUSY is what a Windows sharing violation maps to: another program has the file for now, so
+// wait for it. Any other error won't pass by itself, so it goes back to the caller.
+async function waitWhileBusy(attempt, what) {
+  for (let retryMs = FILE_RETRY_MIN_MS; ; retryMs = Math.min(retryMs * 2, FILE_RETRY_MAX_MS)) {
+    try {
+      return await attempt();
+    } catch (err) {
+      if (err.code !== 'EBUSY') throw err;
+      if (retryMs >= FILE_RETRY_WARN_MS) log(`${what}, waiting for it: ${err.message}`);
+      await sleep(retryMs);
+    }
+  }
+}
+
+// For the rest of this run, the file on disk may be the only copy of the wheel.
+function holdSaves(note) {
+  savesHeld = true;
+  loadNote = note;
+  log(note);
 }
 
 function adoptConfig(parsed) {
@@ -137,9 +237,64 @@ function normalizeSpin(s) {
   return s;
 }
 
-async function persist() {
-  try { await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8'); }
-  catch (err) { log(`Could not persist config: ${err.message}`); }
+// One save runs at a time. A change during a save only marks the config dirty, and the loop then
+// writes the newest state once, so a burst of commands can't overlap its writes or queue them up.
+// A failed save stays dirty and retries by itself, because its change may be the last for a while:
+// Windows refuses the rename while anything has config.json open, even a scanner only reading it.
+function persist() {
+  if (savesHeld) return;
+  saveDirty = true;
+  saveLoop ??= runSaves();
+}
+
+async function runSaves() {
+  let retryMs = FILE_RETRY_MIN_MS;
+  while (saveDirty) {
+    saveDirty = false;
+    try {
+      await writeConfigFile(JSON.stringify(config, null, 2));
+      retryMs = FILE_RETRY_MIN_MS;
+      if (saveNote) {
+        log('config.json is saving again');
+        saveNote = '';
+        pushStatus();
+      }
+    } catch (err) {
+      saveDirty = true;
+      if (retryMs >= FILE_RETRY_WARN_MS && !saveNote) {
+        saveNote = `could not save config.json (${err.code ?? 'error'}), still trying: is another program holding it?`;
+        log(`Could not persist config, still trying: ${err.message}`);
+        try { pushStatus(); } catch { /* the log line is the record */ }
+      }
+      await sleep(retryMs);
+      retryMs = Math.min(retryMs * 2, FILE_RETRY_MAX_MS);
+    }
+  }
+  saveLoop = null;
+}
+
+// config.json only ever goes from one whole save to the next, because the temp file takes the
+// truncating and the partial writes. The flush covers a power cut or a PC crash, which could
+// otherwise leave the renamed file empty (Node before 20.10 ignores it). A refused rename keeps the
+// temp file, so a retry with nothing new only has to rename it again.
+async function writeConfigFile(text) {
+  if (text !== tempText) {
+    tempText = null;
+    try {
+      await writeFile(TEMP_PATH, text, { encoding: 'utf-8', flush: true });
+    } catch (err) {
+      await rm(TEMP_PATH, { force: true }).catch(() => {});
+      throw err;
+    }
+    tempText = text;
+  }
+  try {
+    await rename(TEMP_PATH, CONFIG_PATH);
+    tempText = null;
+  } catch (err) {
+    if (err.code === 'ENOENT') tempText = null; // the temp file went away, so the retry rewrites it
+    throw err;
+  }
 }
 
 // Chat can send any JSON through "!wheel <command> <JSON>", and String() and Number()
@@ -162,6 +317,10 @@ function parseJson(v) {
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}${randomInt(1679616).toString(36).padStart(4, '0')}`;
+}
+
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
 }
 
 // ── Payload / broadcast ───────────────────────────────────────────────────────
@@ -211,7 +370,9 @@ function pushStatus() {
     spinning: !!activeSpin,
     lastSpin: config.lastSpin ? { label: config.lastSpin.selectedEntry.label, tag: config.lastSpin.selectedEntry.tag } : null,
     settings: { ...config.settings },
-    lastError,
+    // The standing notes first and the latest failure last, so a time printed after the text sits next
+    // to that failure. A failed command or a spin changes lastError and ends neither standing note.
+    lastError: [loadNote, saveNote, lastError].filter(Boolean).join(' · '),
   };
   // The reserved pair wins in the C# action, so a Set Argument for `command` inside
   // it can't turn this into a spin. `command`/`value` keep older actions working, at
@@ -527,15 +688,20 @@ async function main() {
   await acquireGuard();
   await loadConfig();
   connectSb();
-  const shutdown = () => {
+  const shutdown = async () => {
     log('shutting down');
     if (revealTimer) clearTimeout(revealTimer);
     if (windowTimer) clearTimeout(windowTimer);
     try { sbWs?.close(); } catch {}
+    // Let a running save finish, but a stalled one can't hold up the exit: config.json keeps the
+    // last whole save, and the next start removes the temp file.
+    setTimeout(() => { log('stopping with the last change unsaved'); process.exit(0); }, SHUTDOWN_SAVE_WAIT_MS);
+    await saveLoop;
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  process.on('SIGHUP', shutdown); // closing the console window, which Windows allows about 10 seconds
 }
 
 main();

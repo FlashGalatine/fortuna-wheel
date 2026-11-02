@@ -8,7 +8,9 @@
 //   4. Sidecar E2E: the REAL fortuna-sidecar.mjs runs against the mock —
 //      entry CRUD, chat !entry dedupe + limits + auto-close, spin lifecycle
 //      (spinning → revealed), channel point redeems, removeOnDraw / removeDrawn,
-//      hostile chat JSON, restart persistence.
+//      hostile chat JSON, restart persistence, config saves under a burst, a kill,
+//      a stalled write and a held file, and starts on a config that's damaged, can't
+//      be read or has no entries list.
 //   5. The REAL actions/fortuna-command.cs, compiled with the .NET Framework's csc
 //      against a stub CPH (tools/action-harness.cs). Proves its logic and C# 5
 //      syntax, not real Streamer.bot behavior. Skipped when csc isn't installed.
@@ -17,10 +19,10 @@
 // to a live Streamer.bot or sidecar. Run: npm run verify
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { readFile, writeFile, rm } from 'node:fs/promises';
+import { closeSync, constants, existsSync, mkdtempSync, openSync, rmSync } from 'node:fs';
+import { mkdir, readdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import WebSocket from 'ws';
 
@@ -31,6 +33,7 @@ const GUARD_PORT = 7494;
 const HTTP = `http://127.0.0.1:${HTTP_PORT}`;
 const WS_URL = `ws://127.0.0.1:${WS_PORT}/`;
 const SPIN_MS = 500; // fast spins for the suite (FORTUNA_SPIN_MS)
+const EXCLUSIVE = 0x10000000; // libuv's UV_FS_O_EXLOCK: on Windows, open a file with no sharing
 
 let pass = 0, fail = 0, skipped = 0;
 function check(name, ok, detail) {
@@ -203,15 +206,24 @@ async function testHttp() {
 
 let sidecarProc = null;
 let sidecarOut = '';
+let heldConfig = null; // this suite's own handle while it holds a config.json with no sharing
 
-function spawnSidecar(cfgPath) {
-  const proc = spawn(process.execPath, [resolve(__dirname, 'fortuna-sidecar.mjs')], {
+const holdConfig = (cfgPath) => { heldConfig = openSync(cfgPath, EXCLUSIVE | constants.O_RDONLY); };
+const releaseConfig = () => { closeSync(heldConfig); heldConfig = null; };
+
+// saveHook loads tools/save-hook.mjs in front of the real sidecar.
+function spawnSidecar(cfgPath, saveHook) {
+  const proc = spawn(process.execPath, [
+    ...(saveHook ? ['--import', pathToFileURL(resolve(__dirname, 'tools', 'save-hook.mjs')).href] : []),
+    resolve(__dirname, 'fortuna-sidecar.mjs'),
+  ], {
     env: {
       ...process.env,
       SB_WS_URL: WS_URL,
       FORTUNA_CONFIG: cfgPath,
       FORTUNA_GUARD_PORT: String(GUARD_PORT),
       FORTUNA_SPIN_MS: String(SPIN_MS),
+      FORTUNA_SAVE_HOOK: saveHook ?? '',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -220,10 +232,30 @@ function spawnSidecar(cfgPath) {
   return proc;
 }
 
+const waitForExit = (proc, timeoutMs = 5000) => new Promise((res) => {
+  if (proc.exitCode !== null || proc.signalCode !== null) { res(true); return; }
+  const timer = setTimeout(() => res(false), timeoutMs);
+  proc.once('exit', () => { clearTimeout(timer); res(true); });
+});
+
 async function testSidecar() {
   console.log('\n[4] sidecar (real process, mock SB)');
 
-  const cfgPath = resolve(tmpdir(), `fortuna-verify-config-${process.pid}.json`);
+  // A folder of its own, so a check can see every file a save leaves behind.
+  const cfgDir = mkdtempSync(resolve(tmpdir(), 'fortuna-verify-config-'));
+  try {
+    await sidecarChecks(cfgDir);
+  } finally {
+    // Here so a run that dies partway leaves no folder behind. The sidecar and any hold of this
+    // suite's own go first, because Windows won't remove a folder with a file open in it.
+    if (sidecarProc) { sidecarProc.kill('SIGKILL'); await waitForExit(sidecarProc); }
+    if (heldConfig !== null) releaseConfig();
+    await rm(cfgDir, { recursive: true, force: true }).catch((err) => console.log(`  - couldn't remove ${cfgDir}: ${err.message}`));
+  }
+}
+
+async function sidecarChecks(cfgDir) {
+  const cfgPath = resolve(cfgDir, 'config.json');
   await writeFile(cfgPath, JSON.stringify({
     entries: [], entryMode: { open: false, maxEntries: 25, windowSec: 0 },
     settings: { removeOnDraw: false, defaultChatTag: 'good' }, lastSpin: null, revision: 0,
@@ -252,6 +284,19 @@ async function testSidecar() {
     request: 'DoAction', id: 'c', action: { name: 'Fortuna Command' },
     args: { command, value: value ?? '', ...(extra || {}) },
   }));
+
+  // Nothing waits for the sidecar's save, so these do. The file's revision says when one landed.
+  const readSaved = (path = cfgPath) => readFile(path, 'utf-8').then(JSON.parse).catch(() => null);
+  const savedWhen = async (pred, timeoutMs = 5000, path = cfgPath) => {
+    for (let i = 0; i * 100 < timeoutMs; i++) {
+      const saved = await readSaved(path);
+      if (saved && pred(saved)) return saved;
+      await sleep(100);
+    }
+    return null;
+  };
+  const savedAt = (revision, timeoutMs, path) => savedWhen((saved) => saved.revision === revision, timeoutMs, path);
+  const strayFiles = async () => (await readdir(cfgDir)).filter((f) => f !== 'config.json');
 
   // Startup: the sidecar re-seeds the persisted payload and announces itself.
   const s0 = await client.next(isStatus).then(parseStatus);
@@ -486,6 +531,9 @@ async function testSidecar() {
   const sSet = await client.next((d) => isStatus(d) && parseStatus(d).settings.removeOnDraw).then(parseStatus);
   check('sidecar: setSettings batch', sSet.settings.removeOnDraw === true && sSet.settings.defaultChatTag === 'neutral',
     JSON.stringify(sSet.settings));
+  // setSettings saves without an update or a new revision, so look for the settings themselves.
+  const savedSettings = await savedWhen((saved) => saved.settings?.removeOnDraw === true && saved.settings.defaultChatTag === 'neutral');
+  check('sidecar: setSettings reaches config.json', !!savedSettings, JSON.stringify((await readSaved())?.settings ?? null));
 
   // Unknown command is ignored without a crash.
   const atUnknown = mark();
@@ -616,27 +664,531 @@ async function testSidecar() {
     wheelBefore.length > 0 && JSON.stringify(uRestored?.entries) === wheelJson, JSON.stringify(uRestored?.entries ?? null));
 
   // ── Restart persistence ──
+  // A list nothing else has saved, so only setEntries' own save can put it in the file. The
+  // chat row carries what !entry's dedupe reads after a restart.
+  const atFresh = mark();
+  cmd('setEntries', JSON.stringify([
+    { label: 'Only setEntries saved this', tag: 'bad' },
+    { label: 'saved_viewer', tag: 'good', source: 'chat', user: 'saved_viewer', userId: 'u777' },
+  ]));
+  const uFresh = await since(atFresh, (d) => isUpdate(d) && d.entries[0]?.label === 'Only setEntries saved this');
+  const savedFresh = await savedAt(uFresh?.revision);
+  const sameEntries = (saved, update) => !!saved && !!update && JSON.stringify(saved.entries) === JSON.stringify(update.entries);
+  check('sidecar: setEntries reaches config.json', sameEntries(savedFresh, uFresh), JSON.stringify(savedFresh?.entries ?? null));
+
+  // Open a window for the kill. The file then says open, so only adoptConfig can close it.
+  const atOpenForKill = mark();
+  cmd('openEntries');
+  await since(atOpenForKill, (d) => isUpdate(d) && d.entryMode.open);
   const lastUpdate = client.events.filter(isUpdate).pop();
-  const entriesBefore = lastUpdate.entries;
-  const lastSpinBefore = lastUpdate.spin;
-  // The kill is abrupt and nothing waits for the sidecar's write, so wait for it here. A
-  // write caught part way would fail the checks below on correct code.
-  const isSaved = () => readFile(cfgPath, 'utf-8').then(JSON.parse)
-    .then((saved) => saved.revision === lastUpdate.revision).catch(() => false);
-  for (let i = 0; i < 50 && !(await isSaved()); i++) await sleep(100);
+  // The kill is abrupt, so wait for the last save here. A change still being saved would be
+  // lost, and that would fail the checks below on correct code.
+  const savedForKill = await savedAt(lastUpdate.revision);
   sidecarProc.kill();
   await sleep(400);
   const atRestart = mark();
   sidecarProc = spawnSidecar(cfgPath);
   const uRestart = await since(atRestart, isUpdate, 5000);
-  check('sidecar: restart restores entries', uRestart && uRestart.entries.length === entriesBefore.length
-    && uRestart.entries.every((e, i) => e.id === entriesBefore[i].id), JSON.stringify(uRestart?.entries.map((e) => e.label)));
+  check('sidecar: restart restores entries', JSON.stringify(uRestart?.entries) === JSON.stringify(lastUpdate.entries), JSON.stringify(uRestart?.entries ?? null));
+  check('sidecar: restart restores entry options', uRestart?.entryMode.maxEntries === 9 && uRestart.entryMode.windowSec === 600, JSON.stringify(uRestart?.entryMode ?? null));
+  check('sidecar: restart restores settings', uRestart?.settings.removeOnDraw === true && uRestart.settings.defaultChatTag === 'neutral', JSON.stringify(uRestart?.settings ?? null));
   check('sidecar: restart restores last revealed spin',
-    uRestart?.spin?.state === 'revealed' && uRestart.spin.spinId === lastSpinBefore.spinId, JSON.stringify(uRestart?.spin ?? null));
-  check('sidecar: entry window never restarts open', uRestart?.entryMode.open === false);
+    uRestart?.spin?.state === 'revealed' && JSON.stringify(uRestart.spin) === JSON.stringify(lastUpdate.spin), JSON.stringify(uRestart?.spin ?? null));
+  check('sidecar: entry window never restarts open', savedForKill?.entryMode.open === true && uRestart?.entryMode.open === false,
+    `saved open: ${savedForKill?.entryMode.open}, restarted open: ${uRestart?.entryMode.open}`);
+
+  // ── Config saves ──
+  // Stopped the way Task Manager or a crash does it, with no chance to tidy up. The next process
+  // has to wait for this one to go: while it holds the guard port, the new one exits over it.
+  const killSidecar = async () => { sidecarProc.kill('SIGKILL'); await waitForExit(sidecarProc); };
+  const startSidecar = async (saveHook) => {
+    const at = mark();
+    sidecarProc = spawnSidecar(cfgPath, saveHook);
+    await since(at, isStatus, 5000); // the update goes out first
+    return client.events.slice(at).filter(isUpdate).pop();
+  };
+  const hookSaid = async (atLog, word) => {
+    for (let i = 0; i < 50 && !sidecarOut.slice(atLog).includes(`[save-hook] ${word}`); i++) await sleep(100);
+    return sidecarOut.slice(atLog).includes(`[save-hook] ${word}`);
+  };
+
+  // A long list and a short one with no gap, so overlapping writes show: a short write over a
+  // long one leaves the long one's tail behind. Rounds, because the race is intermittent.
+  const LONG_LIST = JSON.stringify(Array.from({ length: 150 }, (_, i) => ({ label: `A long entry to save, number ${i}`, tag: 'good' })));
+  const SHORT_LIST = '[{"label":"Short"}]';
+  const sendSaves = (pairs) => { for (let i = 0; i < pairs; i++) { cmd('setEntries', LONG_LIST); cmd('setEntries', SHORT_LIST); } };
+  const floodSaves = async (pairs) => {
+    const at = mark();
+    sendSaves(pairs);
+    for (let i = 0; i < 100 && client.events.slice(at).filter(isUpdate).length < pairs * 2; i++) await sleep(50);
+    return client.events.slice(at).filter(isUpdate).pop();
+  };
+  let burstFault = '';
+  for (let round = 0; round < 10 && !burstFault; round++) {
+    const last = await floodSaves(6);
+    const saved = await savedAt(last?.revision);
+    const stray = await strayFiles();
+    if (!sameEntries(saved, last) || stray.length) {
+      burstFault = `round ${round}: ${saved ? `${saved.entries.length} of ${last?.entries.length} entries` : 'never whole at the last revision'}, stray [${stray}]`;
+    }
+  }
+  check('sidecar: a burst of saves leaves config.json whole and final', !burstFault, burstFault);
+
+  // However it's timed, a read must find a whole save, so keep reading across steady saves. An
+  // open can fail as the rename lands, and that's fine: only what a read returns has to parse.
+  // Reads this tight can hold off the rename for a long time, so the last save only has to land
+  // once they stop. A save that was lost, not just late, never would.
+  let reading = true, partialRead = '';
+  const reader = (async () => {
+    while (reading) {
+      const raw = await readFile(cfgPath, 'utf-8').catch(() => null);
+      if (raw === null) continue;
+      try { JSON.parse(raw); } catch (err) { partialRead ||= `${raw.length} chars: ${err.message}`; }
+    }
+  })();
+  const atReads = mark();
+  for (let i = 0; i < 40; i++) { sendSaves(1); await sleep(40); }
+  reading = false;
+  await reader;
+  for (let i = 0; i < 100 && client.events.slice(atReads).filter(isUpdate).length < 80; i++) await sleep(50);
+  const lastRead = client.events.slice(atReads).filter(isUpdate).pop();
+  const savedAfterReads = await savedAt(lastRead?.revision, 10000);
+  check('sidecar: a read during saves only finds whole ones, and the last save lands after',
+    !partialRead && sameEntries(savedAfterReads, lastRead), partialRead || `saved: ${savedAfterReads?.revision}, last: ${lastRead?.revision}`);
+
+  // A slow write lets commands pile up behind it: they must wait, and then share one write.
+  await killSidecar();
+  const atSlowLog = sidecarOut.length;
+  await startSidecar('slow');
+  const lastSlow = await floodSaves(10);
+  const savedSlow = await savedAt(lastSlow?.revision);
+  // The newest state can land while a queue of redundant writes is still draining, so count
+  // only once the log has gone quiet.
+  for (let seen = -1, i = 0; i < 25 && seen !== sidecarOut.length; i++) { seen = sidecarOut.length; await sleep(400); }
+  let writes = 0, writing = 0, mostWriting = 0;
+  for (const [, word] of sidecarOut.slice(atSlowLog).matchAll(/\[save-hook\] (start|done)/g)) {
+    if (word === 'start') writes++;
+    writing += word === 'start' ? 1 : -1;
+    mostWriting = Math.max(mostWriting, writing);
+  }
+  check('sidecar: slow saves run one at a time and collapse what piled up',
+    sameEntries(savedSlow, lastSlow) && writes >= 1 && writes <= 10 && mostWriting === 1, `${writes} writes for 20 commands, ${mostWriting} at once`);
+
+  // A write that stalls after opening its file, then a stop: the case that used to leave an
+  // empty config.json and a blank wheel.
+  await killSidecar();
+  const beforeStall = await readSaved();
+  const atStallLog = sidecarOut.length;
+  await startSidecar('stall');
+  cmd('addEntry', 'Caught by the stall');
+  const stalled = await hookSaid(atStallLog, 'stalled');
+  await killSidecar();
+  const afterStall = await readSaved();
+  check('sidecar: a stop during a stalled save leaves config.json whole',
+    stalled && !!beforeStall && JSON.stringify(afterStall) === JSON.stringify(beforeStall), `stalled: ${stalled}, saved: ${JSON.stringify(afterStall)?.slice(0, 200)}`);
+  const strayAfterStall = await strayFiles();
+  const uAfterStall = await startSidecar();
+  const strayAfterStart = await strayFiles();
+  check('sidecar: the next start removes the temp file and restores the wheel',
+    strayAfterStall.length === 1 && strayAfterStart.length === 0 && sameEntries(beforeStall, uAfterStall),
+    `stray after the stop: [${strayAfterStall}], after the start: [${strayAfterStart}], entries: ${uAfterStall?.entries.length}`);
+
+  // The same stop with no hook, at whatever point the flood has reached.
+  let killFault = '';
+  for (let round = 0; round < 5 && !killFault; round++) {
+    await killSidecar();
+    await startSidecar();
+    sendSaves(12);
+    await sleep(5 + Math.random() * 60);
+    await killSidecar();
+    const raw = await readFile(cfgPath, 'utf-8');
+    let saved = null;
+    try { saved = JSON.parse(raw); } catch (err) { killFault = `round ${round}: ${raw.length} chars, ${err.message}`; }
+    if (saved && ![1, 150].includes(saved.entries.length)) killFault = `round ${round}: ${saved.entries.length} entries`;
+  }
+  check('sidecar: a kill during a flood of saves leaves config.json whole', !killFault, killFault);
+
+  // Ctrl+C is the polite stop, so it waits for a running save. Not for one that has stalled.
+  const atOutLog = sidecarOut.length;
+  await startSidecar('slow,sigint');
+  cmd('addEntry', 'Saved on the way out');
+  const exitedOut = (await hookSaid(atOutLog, 'start')) && (await waitForExit(sidecarProc));
+  const savedOut = await readSaved();
+  check('sidecar: Ctrl+C lets a running save finish',
+    exitedOut && sidecarProc.exitCode === 0 && !!savedOut?.entries.some((e) => e.label === 'Saved on the way out'),
+    `exited: ${exitedOut}, code ${sidecarProc.exitCode}, ${savedOut?.entries.length} entries saved`);
+
+  // Closing the console window is the README's way to stop it, and reaches Node as SIGHUP.
+  const atHupLog = sidecarOut.length;
+  await startSidecar('slow,sighup');
+  cmd('addEntry', 'Saved as the window closed');
+  const exitedHup = (await hookSaid(atHupLog, 'start')) && (await waitForExit(sidecarProc));
+  const savedHup = await readSaved();
+  check('sidecar: SIGHUP, as from closing the console window, lets a running save finish',
+    exitedHup && sidecarProc.exitCode === 0 && !!savedHup?.entries.some((e) => e.label === 'Saved as the window closed'),
+    `exited: ${exitedHup}, code ${sidecarProc.exitCode}, ${savedHup?.entries.length} entries saved`);
+  await killSidecar(); // still up if the signal did nothing
+
+  const beforeStallStop = await readSaved();
+  const atStallStopLog = sidecarOut.length;
+  await startSidecar('stall,sigint');
+  cmd('addEntry', 'Never saved');
+  const stalledStop = await hookSaid(atStallStopLog, 'stalled');
+  const exitedStall = await waitForExit(sidecarProc);
+  const afterStallStop = await readSaved();
+  check('sidecar: Ctrl+C during a stalled save still exits, with config.json whole',
+    stalledStop && exitedStall && sidecarProc.exitCode === 0 && JSON.stringify(afterStallStop) === JSON.stringify(beforeStallStop),
+    `stalled: ${stalledStop}, exited: ${exitedStall}, code ${sidecarProc.exitCode}`);
+
+  // Windows refuses to replace a file that's open, even for a read, and may refuse to read one
+  // that's held with no sharing. This suite holds it from another process, as an editor would.
+  if (process.platform === 'win32') {
+    const atHoldLog = sidecarOut.length;
+    await startSidecar('log');
+    const atHold = mark();
+    holdConfig(cfgPath);
+    cmd('addEntry', 'Held back for now');
+    const isRefusal = (d) => isStatus(d) && parseStatus(d).lastError.startsWith('could not save config.json');
+    const refusal = await since(atHold, isRefusal, 5000);
+    const strayWhileHeld = await strayFiles();
+    const tempPath = `${cfgPath}.tmp`;
+    const readTemp = () => readFile(tempPath, 'utf-8').then(JSON.parse).catch(() => null);
+    const tempWhileHeld = await readTemp();
+    const uRefused = client.events.filter(isUpdate).pop();
+    check('sidecar: a refused save tells the control page and keeps its temp file for the retry',
+      !!refusal && strayWhileHeld.join() === 'config.json.tmp' && sameEntries(tempWhileHeld, uRefused) && sidecarProc.exitCode === null,
+      `note: ${!!refusal}, stray: [${strayWhileHeld}]`);
+    // Several refusals have gone by before the note, so a second write means each one rewrote it.
+    const writesSinceHold = () => sidecarOut.slice(atHoldLog).match(/\[save-hook\] start/g)?.length ?? 0;
+    check('sidecar: a retry with nothing new only retries the rename', writesSinceHold() === 1, `${writesSinceHold()} writes`);
+
+    // The usual end of a hold: the temp file is still there, so the rename alone lands the save.
+    const atRelease = mark();
+    releaseConfig();
+    const savedReleased = await savedAt(uRefused?.revision, 20000);
+    const sReleased = await since(atRelease, (d) => isStatus(d) && parseStatus(d).lastError === '', 3000);
+    check('sidecar: a refused save lands by itself once config.json is free, with no second write',
+      sameEntries(savedReleased, uRefused) && uRefused.entries.some((e) => e.label === 'Held back for now') && !!sReleased && (await strayFiles()).length === 0 && writesSinceHold() === 1,
+      `saved: ${savedReleased?.entries.length} of ${uRefused?.entries.length}, note cleared: ${!!sReleased}, stray: [${await strayFiles()}], ${writesSinceHold()} writes`);
+
+    // A second hold, for what can go on during one.
+    const atHoldAgain = mark();
+    holdConfig(cfgPath);
+    cmd('addEntry', 'Held back again');
+    await since(atHoldAgain, isRefusal, 5000);
+
+    // Neither a failed command nor a spin ends the problem, so neither may end the note.
+    const showsRefusal = (d) => parseStatus(d).lastError.includes('could not save config.json');
+    const atFailedHeld = mark();
+    cmd('removeEntry', 'Nothing by this name');
+    const sFailedHeld = await since(atFailedHeld, (d) => isStatus(d) && parseStatus(d).lastError.includes('removeEntry:'), 3000);
+    check('sidecar: a failed command during a refused save shows both notes', !!sFailedHeld && showsRefusal(sFailedHeld), sFailedHeld?.value);
+    const atSpinHeld = mark();
+    cmd('spin');
+    const sSpinHeld = await since(atSpinHeld, (d) => isStatus(d) && parseStatus(d).spinning, 3000);
+    const sRevealHeld = await since(atSpinHeld, (d) => isStatus(d) && !parseStatus(d).spinning, 3000);
+    check('sidecar: a spin during a refused save keeps the note',
+      !!sSpinHeld && showsRefusal(sSpinHeld) && !!sRevealHeld && showsRefusal(sRevealHeld), `${sSpinHeld?.value} | ${sRevealHeld?.value}`);
+
+    // A change while it's held has to reach the temp file, or the retry would land an old save.
+    const atChangeHeld = mark();
+    cmd('addEntry', 'Saved once the file is free');
+    const uHeld = await since(atChangeHeld, (d) => isUpdate(d) && d.entries.some((e) => e.label === 'Saved once the file is free'));
+    let tempChanged = null;
+    for (let i = 0; i < 80 && !tempChanged; i++) {
+      const temp = await readTemp();
+      if (temp?.revision === uHeld?.revision) tempChanged = temp;
+      else await sleep(100);
+    }
+    check('sidecar: a retry after a change rewrites the temp file', sameEntries(tempChanged, uHeld), `temp: ${tempChanged?.revision}, last: ${uHeld?.revision}`);
+
+    // A scanner can take the temp file away. The retry has to notice, or it never lands. That
+    // takes two more retries, up to 5 s apart, and a scanner can still refuse one after that.
+    await rm(tempPath, { force: true });
+    const atReleaseGone = mark();
+    releaseConfig();
+    const savedHeld = await savedAt(uHeld.revision, 20000);
+    const sCleared = await since(atReleaseGone, (d) => isStatus(d) && parseStatus(d).lastError === '', 3000);
+    check('sidecar: a refused save still lands once config.json is free with its temp file gone',
+      sameEntries(savedHeld, uHeld) && uHeld.entries.some((e) => e.label === 'Saved once the file is free') && !!sCleared && (await strayFiles()).length === 0,
+      `saved: ${savedHeld?.entries.length} of ${uHeld.entries.length}, note cleared: ${!!sCleared}`);
+
+    // Starting blank here would have the next save overwrite the wheel the file still holds.
+    await killSidecar();
+    const savedBeforeHold = await readSaved();
+    const atHeldStart = mark();
+    holdConfig(cfgPath);
+    sidecarProc = spawnSidecar(cfgPath);
+    await sleep(1000);
+    const startedWhileHeld = client.events.slice(atHeldStart).some(isUpdate);
+    releaseConfig();
+    const uHeldStart = await since(atHeldStart, isUpdate, 8000);
+    check('sidecar: a config.json held at startup is waited for, not replaced',
+      !startedWhileHeld && sameEntries(savedBeforeHold, uHeldStart), `started while held: ${startedWhileHeld}, entries: ${uHeldStart?.entries.length} of ${savedBeforeHold?.entries.length}`);
+  } else {
+    skipped += 8;
+    console.log('  - skipped: only Windows refuses to replace or read a held file');
+  }
+
+  // A file that won't parse, from a hand edit or an older version's save: the next save
+  // replaces it, so it has to be copied first and the streamer told.
+  await killSidecar();
+  const DAMAGED = '{"entries":[{"label":"Damaged"}]}\ntrailing bytes';
+  await writeFile(cfgPath, DAMAGED, 'utf-8');
+  const readBadCopy = () => readFile(`${cfgPath}.bad`, 'utf-8').catch(() => null);
+  const atDamaged = mark();
+  sidecarProc = spawnSidecar(cfgPath);
+  const sDamaged = await since(atDamaged, isStatus, 5000).then((d) => (d ? parseStatus(d) : null));
+  check('sidecar: a damaged config.json is copied aside', (await readBadCopy()) === DAMAGED && sDamaged?.entryCount === 0,
+    `copy: ${await readBadCopy()}, entries: ${sDamaged?.entryCount}`);
+  check('sidecar: the control page hears about a damaged config.json', /config\.json was damaged.*config\.json\.bad/.test(sDamaged?.lastError ?? ''), sDamaged?.lastError);
+
+  // That note is the only word of where the copy went, so what happens next can't take it away.
+  const showsCopy = (d) => parseStatus(d).lastError.includes('A copy is kept as config.json.bad.');
+  const atEmptySpin = mark();
+  cmd('spin');
+  const sEmptySpin = await since(atEmptySpin, (d) => isStatus(d) && parseStatus(d).lastError.includes('spin: the wheel is empty'), 3000);
+  check('sidecar: a spin on the empty wheel keeps the damaged-config note', !!sEmptySpin && showsCopy(sEmptySpin), sEmptySpin?.value);
+  const atFailedDamaged = mark();
+  cmd('removeEntry', 'Nothing by this name');
+  const sFailedDamaged = await since(atFailedDamaged, (d) => isStatus(d) && parseStatus(d).lastError.includes('removeEntry:'), 3000);
+  check('sidecar: a failed command keeps the damaged-config note, with the failure last',
+    !!sFailedDamaged && showsCopy(sFailedDamaged) && parseStatus(sFailedDamaged).lastError.endsWith('removeEntry: no entry "Nothing by this name"'), sFailedDamaged?.value);
+
+  const atRepair = mark();
+  cmd('addEntry', 'After the damage');
+  const uRepair = await since(atRepair, (d) => isUpdate(d) && d.entries.some((e) => e.label === 'After the damage'));
+  const savedRepair = await savedAt(uRepair?.revision);
+  check('sidecar: the next save repairs config.json and keeps the copy', sameEntries(savedRepair, uRepair) && (await readBadCopy()) === DAMAGED,
+    `saved: ${JSON.stringify(savedRepair?.entries ?? null)}, copy: ${await readBadCopy()}`);
+  const atRepairSpin = mark();
+  cmd('spin');
+  const sRepairSpin = await since(atRepairSpin, (d) => isStatus(d) && parseStatus(d).spinning, 3000);
+  check('sidecar: the damaged-config note stays after a save and through a spin', !!sRepairSpin && showsCopy(sRepairSpin), sRepairSpin?.value);
+  const sRepairReveal = await since(atRepairSpin, (d) => isStatus(d) && !parseStatus(d).spinning, 3000);
+  check('sidecar: the damaged-config note stays after the reveal', !!sRepairReveal && showsCopy(sRepairReveal), sRepairReveal?.value);
+
+  const startOn = async (path, saveHook) => {
+    await killSidecar();
+    const at = mark();
+    sidecarProc = spawnSidecar(path, saveHook);
+    const d = await since(at, isStatus, 5000); // the update goes out first
+    return { status: d ? parseStatus(d) : null, update: client.events.slice(at).filter(isUpdate).pop() };
+  };
+
+  const { status: sRepaired } = await startOn(cfgPath);
+  check('sidecar: a restart on a good file clears the note', sRepaired?.lastError === '' && (await readBadCopy()) === DAMAGED, sRepaired?.lastError);
+
+  // A later damaged file must not replace a copy that may hold the only good wheel.
+  for (const [copyName, text] of [['config.json.bad.1', ''], ['config.json.bad.2', '{"entries":[']]) {
+    await killSidecar();
+    await writeFile(cfgPath, text, 'utf-8');
+    const { status } = await startOn(cfgPath);
+    const copy = await readFile(resolve(cfgDir, copyName), 'utf-8').catch(() => null);
+    check(`sidecar: another damaged config.json goes to ${copyName} and the first copy stays`,
+      (await readBadCopy()) === DAMAGED && copy === text && !!status?.lastError.includes(`A copy is kept as ${copyName}.`),
+      `first copy: ${await readBadCopy()}, this copy: ${copy}, note: ${status?.lastError}`);
+  }
+
+  // Each of these gets a folder of its own, so it can see every file the sidecar leaves there.
+  let cases = 0;
+  const newCase = async (text) => {
+    const dir = resolve(cfgDir, `case-${++cases}`);
+    await mkdir(dir);
+    const path = resolve(dir, 'config.json');
+    if (text !== undefined) await writeFile(path, text, 'utf-8');
+    return { path, files: async () => (await readdir(dir)).sort().join() };
+  };
+  const addAndSettle = async (label) => {
+    const at = mark();
+    cmd('addEntry', label);
+    const update = await since(at, (d) => isUpdate(d) && d.entries.some((e) => e.label === label), 3000);
+    await sleep(300); // a save would have started by now
+    return update;
+  };
+
+  // A config that can't be read may still hold the wheel: start anyway, say so, never replace it.
+  const unreadable = await newCase();
+  await mkdir(unreadable.path);
+  const atUnreadableLog = sidecarOut.length;
+  const { status: sUnreadable } = await startOn(unreadable.path, 'log');
+  check('sidecar: a config path that is a folder starts anyway and says nothing will be saved',
+    /could not read config\.json.*nothing will be saved/.test(sUnreadable?.lastError ?? '') && sUnreadable?.entryCount === 0, JSON.stringify(sUnreadable));
+  const uUnreadable = await addAndSettle('Not saved over a folder');
+  check('sidecar: a config that can\'t be read gets no save at all',
+    !!uUnreadable && !sidecarOut.slice(atUnreadableLog).includes('[save-hook] start') && (await unreadable.files()) === 'config.json',
+    `update: ${!!uUnreadable}, files: ${await unreadable.files()}`);
+  const atUnreadableSpin = mark();
+  cmd('spin');
+  const sUnreadableSpin = await since(atUnreadableSpin, (d) => isStatus(d) && parseStatus(d).spinning, 3000);
+  check('sidecar: the note about a config that can\'t be read stays through a spin',
+    !!sUnreadableSpin && parseStatus(sUnreadableSpin).lastError.includes('could not read config.json'), sUnreadableSpin?.value);
+  const sUnreadableReveal = await since(atUnreadableSpin, (d) => isStatus(d) && !parseStatus(d).spinning, 3000);
+  check('sidecar: the note about a config that can\'t be read stays after the reveal',
+    !!sUnreadableReveal && parseStatus(sUnreadableReveal).lastError.includes('could not read config.json'), sUnreadableReveal?.value);
+
+  // With no copy made, the damaged file is the only one there is, so it has to stay.
+  const noCopy = await newCase(DAMAGED);
+  const atNoCopyLog = sidecarOut.length;
+  const { status: sNoCopy } = await startOn(noCopy.path, 'copyfail');
+  check('sidecar: a damaged config.json that can\'t be copied says nothing will be saved',
+    sidecarOut.slice(atNoCopyLog).includes('[save-hook] copy refused') && /no copy could be made.*nothing will be saved/.test(sNoCopy?.lastError ?? ''), sNoCopy?.lastError);
+  const uNoCopy = await addAndSettle('Not saved over the damage');
+  const rawNoCopy = await readFile(noCopy.path, 'utf-8');
+  check('sidecar: a damaged config.json that can\'t be copied is never saved over',
+    !!uNoCopy && rawNoCopy === DAMAGED && !sidecarOut.slice(atNoCopyLog).includes('[save-hook] start') && (await noCopy.files()) === 'config.json',
+    `update: ${!!uNoCopy}, file: ${rawNoCopy.slice(0, 80)}, files: ${await noCopy.files()}`);
+  const atNoCopyFailed = mark();
+  cmd('removeEntry', 'Nothing by this name');
+  const sNoCopyFailed = await since(atNoCopyFailed, (d) => isStatus(d) && parseStatus(d).lastError.includes('removeEntry:'), 3000);
+  check('sidecar: the note about a copy that couldn\'t be made stays through a failed command',
+    !!sNoCopyFailed && parseStatus(sNoCopyFailed).lastError.includes('no copy could be made'), sNoCopyFailed?.value);
+
+  if (process.platform === 'win32') {
+    const busyCopy = await newCase(DAMAGED);
+    const atBusyLog = sidecarOut.length;
+    const { status: sBusy } = await startOn(busyCopy.path, 'copybusy');
+    const copiedBusy = await readFile(`${busyCopy.path}.bad`, 'utf-8').catch(() => null);
+    check('sidecar: a damaged config.json held during its copy is waited for, then copied',
+      sidecarOut.slice(atBusyLog).includes('[save-hook] copy held') && copiedBusy === DAMAGED && !!sBusy?.lastError.includes('A copy is kept as config.json.bad.'),
+      `copy: ${copiedBusy}, note: ${sBusy?.lastError}`);
+
+    // Both notes up at once: the one about the load leads, and a landed save ends only the refusal.
+    const both = await newCase(DAMAGED);
+    await startOn(both.path);
+    holdConfig(both.path);
+    const atBoth = mark();
+    cmd('addEntry', 'Held on a damaged start');
+    const sBoth = await since(atBoth, (d) => isStatus(d) && parseStatus(d).lastError.includes('could not save config.json'), 5000);
+    releaseConfig();
+    const atBothFree = mark();
+    const sBothFree = await since(atBothFree, (d) => isStatus(d) && !parseStatus(d).lastError.includes('could not save config.json'), 20000);
+    check('sidecar: the load note and a refused save show together, and a landed save ends only the second',
+      !!sBoth && parseStatus(sBoth).lastError.startsWith('config.json was damaged') && !!sBothFree && showsCopy(sBothFree), `${sBoth?.value} | ${sBothFree?.value}`);
+  } else {
+    skipped += 2;
+    console.log('  - skipped: only Windows refuses to copy or replace a held file');
+  }
+
+  // Valid JSON that isn't a wheel would read as an empty one, and the next save would replace it.
+  for (const [name, text] of [
+    ['a bare array', '[{"label":"In a bare array"}]'],
+    ['a string', '"In a string"'],
+    ['a number', '42'],
+    ['null', 'null'],
+    ['entries as an object', '{"entries":{"a":{"label":"Keyed"}}}'],
+    ['entries as null', '{"entries":null}'],
+    ['entries with every label misspelled', '{"entries":[{"lable":"One"},{"lable":"Two"}],"revision":40}'],
+    ['entries as bare strings', '{"entries":["One","Two"],"revision":40}'],
+  ]) {
+    const wrong = await newCase(text);
+    const { status } = await startOn(wrong.path);
+    const copy = await readFile(`${wrong.path}.bad`, 'utf-8').catch(() => null);
+    check(`sidecar: a config.json of ${name} counts as damaged`,
+      copy === text && !!status?.lastError.includes('config.json was damaged') && status.entryCount === 0, `copy: ${copy}, note: ${status?.lastError}`);
+  }
+
+  // [] clears the wheel on purpose, so it's a wheel like any other.
+  const emptyList = await newCase('{"entries":[],"revision":40}');
+  const { status: sEmptyList, update: uEmptyList } = await startOn(emptyList.path);
+  check('sidecar: an empty entries list gets no copy and no note',
+    sEmptyList?.lastError === '' && uEmptyList?.revision === 40 && (await emptyList.files()) === 'config.json',
+    `note: ${sEmptyList?.lastError}, revision: ${uEmptyList?.revision}, files: ${await emptyList.files()}`);
+
+  // A settings-only file is allowed, but a misspelled key reads the same, so it loads with a copy kept.
+  const SETTINGS_ONLY = '{"settings":{"defaultChatTag":"bad"}}';
+  const NO_ENTRIES_NOTE = /no entries list was found.*A copy is kept as config\.json\.bad\./;
+  const readCopy = (kase) => readFile(`${kase.path}.bad`, 'utf-8').catch(() => null);
+  const noEntries = await newCase(SETTINGS_ONLY);
+  const { status: sNoEntries } = await startOn(noEntries.path);
+  check('sidecar: a config.json with no entries key is still a config, with a copy and a note',
+    sNoEntries?.settings.defaultChatTag === 'bad' && sNoEntries.entryCount === 0 && NO_ENTRIES_NOTE.test(sNoEntries.lastError)
+      && (await readCopy(noEntries)) === SETTINGS_ONLY && (await noEntries.files()) === 'config.json,config.json.bad',
+    `${JSON.stringify(sNoEntries)}, files: ${await noEntries.files()}`);
+  const { status: sNoEntriesAgain } = await startOn(noEntries.path);
+  check('sidecar: another start on a file with no entries key takes the next name for its copy',
+    !!sNoEntriesAgain?.lastError.includes('A copy is kept as config.json.bad.1.') && (await readCopy(noEntries)) === SETTINGS_ONLY && (await noEntries.files()) === 'config.json,config.json.bad,config.json.bad.1',
+    `note: ${sNoEntriesAgain?.lastError}, files: ${await noEntries.files()}`);
+
+  let misspelled;
+  for (const [key, text] of [
+    ['entrys', '{"entrys":[{"label":"One"},{"label":"Two"}],"revision":40}'],
+    ['Entries', '{"Entries":[{"label":"One"},{"label":"Two"}],"revision":40}'],
+  ]) {
+    misspelled = { text, ...(await newCase(text)) };
+    const { status, update } = await startOn(misspelled.path);
+    check(`sidecar: a misspelled "${key}" key loads empty, with a copy and a note`,
+      update?.revision === 40 && status?.entryCount === 0 && NO_ENTRIES_NOTE.test(status.lastError) && (await readCopy(misspelled)) === text,
+      `revision: ${update?.revision}, note: ${status?.lastError}, copy: ${await readCopy(misspelled)}`);
+  }
+  // The first change replaces the file, so from here the copy and the note are all there is.
+  const uMisspelled = await addAndSettle('After the misspelled key');
+  const savedMisspelled = await savedAt(uMisspelled?.revision, undefined, misspelled.path);
+  const atFailedMisspelled = mark();
+  cmd('removeEntry', 'Nothing by this name');
+  const sFailedMisspelled = await since(atFailedMisspelled, (d) => isStatus(d) && parseStatus(d).lastError.includes('removeEntry:'), 3000);
+  check('sidecar: the first change saves over a misspelled key, and the copy and the note stay',
+    sameEntries(savedMisspelled, uMisspelled) && (await readCopy(misspelled)) === misspelled.text && !!sFailedMisspelled && NO_ENTRIES_NOTE.test(parseStatus(sFailedMisspelled).lastError),
+    `saved: ${JSON.stringify(savedMisspelled?.entries ?? null)}, copy: ${await readCopy(misspelled)}, note: ${sFailedMisspelled?.value}`);
+
+  const noEntriesNoCopy = await newCase(SETTINGS_ONLY);
+  const atNoEntriesNoCopyLog = sidecarOut.length;
+  const { status: sNoEntriesNoCopy } = await startOn(noEntriesNoCopy.path, 'copyfail');
+  check('sidecar: a config.json with no entries key that can\'t be copied says nothing will be saved',
+    sidecarOut.slice(atNoEntriesNoCopyLog).includes('[save-hook] copy refused') && /no entries list was found.*no copy could be made.*nothing will be saved/.test(sNoEntriesNoCopy?.lastError ?? '')
+      && sNoEntriesNoCopy.settings.defaultChatTag === 'bad', JSON.stringify(sNoEntriesNoCopy));
+  const uNoEntriesNoCopy = await addAndSettle('Not saved over the settings');
+  const rawNoEntriesNoCopy = await readFile(noEntriesNoCopy.path, 'utf-8');
+  check('sidecar: a config.json with no entries key that can\'t be copied is never saved over',
+    !!uNoEntriesNoCopy && rawNoEntriesNoCopy === SETTINGS_ONLY && !sidecarOut.slice(atNoEntriesNoCopyLog).includes('[save-hook] start') && (await noEntriesNoCopy.files()) === 'config.json',
+    `update: ${!!uNoEntriesNoCopy}, file: ${rawNoEntriesNoCopy.slice(0, 80)}, files: ${await noEntriesNoCopy.files()}`);
+
+  const withBom = await newCase('\uFEFF{"entries":[{"label":"Behind a byte order mark"}]}');
+  const { status: sBom, update: uBom } = await startOn(withBom.path);
+  check('sidecar: a byte order mark costs nothing',
+    uBom?.entries[0]?.label === 'Behind a byte order mark' && sBom?.lastError === '' && (await withBom.files()) === 'config.json',
+    `entries: ${JSON.stringify(uBom?.entries ?? null)}, note: ${sBom?.lastError}, files: ${await withBom.files()}`);
+
+  // A first run: the example becomes the wheel whether or not it can be written yet.
+  const example = JSON.parse(await readFile(resolve(__dirname, 'config.example.json'), 'utf-8'));
+  const exampleIds = JSON.stringify(example.entries.map((e) => e.id));
+  const idsOf = (update) => JSON.stringify(update?.entries.map((e) => e.id));
+  const seeded = await newCase();
+  const { status: sSeeded, update: uSeeded } = await startOn(seeded.path);
+  const savedSeed = await readFile(seeded.path, 'utf-8').then(JSON.parse).catch(() => null);
+  check('sidecar: a first run seeds config.json from the example, with no copy and no note',
+    example.entries.length > 0 && idsOf(uSeeded) === exampleIds && JSON.stringify(savedSeed?.entries.map((e) => e.id)) === exampleIds && (await seeded.files()) === 'config.json' && sSeeded?.lastError === '',
+    `update: ${idsOf(uSeeded)}, saved: ${JSON.stringify(savedSeed?.entries ?? null)}, files: ${await seeded.files()}, note: ${sSeeded?.lastError}`);
+
+  // The example holds no wheel of the streamer's, so what guards a real config stays out of its way.
+  for (const [what, word] of [
+    ['no entries key', 'examplenoentries'],
+    ['nothing usable in its entries list', 'exampleunusable'],
+  ]) {
+    const oddExample = await newCase();
+    const atOddLog = sidecarOut.length;
+    const { status } = await startOn(oddExample.path, word);
+    check(`sidecar: a first run on an example with ${what} gets no copy and no note`,
+      sidecarOut.slice(atOddLog).includes('[save-hook] example replaced') && status?.lastError === '' && (await oddExample.files()) === 'config.json',
+      `note: ${status?.lastError}, files: ${await oddExample.files()}`);
+  }
+
+  // A folder where the temp file goes: the example reads fine, but no write can land.
+  const noSeed = await newCase();
+  await mkdir(`${noSeed.path}.tmp`);
+  const atNoSeedLog = sidecarOut.length;
+  const { status: sNoSeed, update: uNoSeed } = await startOn(noSeed.path);
+  for (let i = 0; i < 20 && !sidecarOut.slice(atNoSeedLog).includes('Could not seed'); i++) await sleep(100);
+  const noSeedLog = sidecarOut.slice(atNoSeedLog);
+  check('sidecar: a failed seed still starts on the example and logs the real error',
+    idsOf(uNoSeed) === exampleIds && /Could not seed .*E[A-Z]+/.test(noSeedLog) && !noSeedLog.includes('No config.example.json') && sNoSeed?.lastError === '',
+    `update: ${idsOf(uNoSeed)}, log: ${noSeedLog.slice(0, 400)}, note: ${sNoSeed?.lastError}`);
+  const atWontWrite = mark();
+  cmd('addEntry', 'Never gets to a temp file');
+  const sWontWrite = await since(atWontWrite, (d) => isStatus(d) && parseStatus(d).lastError.startsWith('could not save config.json'), 5000);
+  check('sidecar: a save that can\'t write its temp file keeps trying and says so', !!sWontWrite && sidecarProc.exitCode === null, `note: ${!!sWontWrite}`);
 
   client.ws.close();
-  await rm(cfgPath, { force: true });
 }
 
 // ── 5. The real C# action ─────────────────────────────────────────────────────
