@@ -99,7 +99,9 @@ action, as described below.
    end its `node.exe` in Task Manager: it has no window, and a new copy exits
    without replacing a running one.
 3. Paste the current `fortuna-command.cs` into the action and click Compile.
-4. Start the sidecar again, and reload the control page and any OBS docks.
+4. If you added a *Set Argument* for `command` or `value` inside `Fortuna Command`,
+   delete it and use a separate action, as described below. Updating doesn't remove it.
+5. Start the sidecar again, and reload the control page and any OBS docks.
 
 **Set a cooldown of at least 10 seconds on a spin reward** (in its Twitch
 settings). A spin takes up to about 8 seconds, and a redeem is refused while the
