@@ -42,6 +42,12 @@ wheel fix is partly in the overlay.
   clear it, not even a spin from chat, so a failure stays visible on a launch with no
   log to read (docs/PROTOCOL.md).
 
+### Documentation
+
+- Setup and update steps said to click Compile, which only tests the code. A reader
+  who stopped there kept the old action. They now say Save and Compile, including in
+  the 1.0.12 notes below.
+
 Verified offline: `verify` 214/214, `verify:render` 26/26.
 
 Not yet verified live: all three fixes. They ran in a browser against the real sidecar
@@ -52,8 +58,8 @@ which Streamer.bot's docs imply for a DoAction but which hasn't been seen on a l
 
 **To upgrade,** follow "Updating an existing install" in the README: get the new
 files, stop the sidecar, paste the new `fortuna-command.cs` into the action, click
-Compile, then start the sidecar and reload the control page and any OBS docks. The
-self-spin fix needs all of them current. On the old action, a directly attached
+Save and Compile, then start the sidecar and reload the control page and any OBS
+docks. The self-spin fix needs all of them current. On the old action, a directly attached
 reward does nothing or runs the viewer's text as a command. Updating doesn't remove a
 Set Argument for `command` or `value` you added inside `Fortuna Command`, which the
 old header suggested for Stream Deck. Delete it and use a separate action: a fixed

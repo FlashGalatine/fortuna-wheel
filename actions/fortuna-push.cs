@@ -14,8 +14,8 @@
 //   1. Streamer.bot -> Actions -> add an action named EXACTLY "Fortuna Push"
 //      (the name matters: both the sidecar and panel-core call it by name).
 //   2. Add a sub-action: Core -> C# -> Execute C# Code. Paste EVERYTHING below and
-//      click COMPILE — it must report success. A compile error means the action
-//      runs but broadcasts nothing, which shows up as a blank/stale wheel.
+//      click Save and Compile — it must report success. A compile error means the
+//      action runs but broadcasts nothing, which shows up as a blank/stale wheel.
 //
 // NOTE: uses ONLY types in Streamer.bot's default C# reference set — JSON is
 // hand-written (no Newtonsoft). Verified pattern from Tally/Zipper on SB 1.0.4.

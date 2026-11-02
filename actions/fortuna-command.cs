@@ -37,8 +37,8 @@
 // removeDrawn, setSettings, status.
 //
 // Setup: add an action named EXACTLY "Fortuna Command" with a single
-// Core -> C# -> Execute C# Code sub-action holding everything below (COMPILE must
-// report success). Default reference set only — JSON is hand-written.
+// Core -> C# -> Execute C# Code sub-action holding everything below (Save and
+// Compile must report success). Default reference set only — JSON is hand-written.
 
 using System;
 using System.Text;

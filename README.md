@@ -61,8 +61,8 @@ or click **<> Code → Download ZIP** on the repo page and extract it. The
 Create two actions, each with a single **Core → C# → Execute C# Code**
 sub-action, named **exactly**:
 
-- `Fortuna Push` — paste [actions/fortuna-push.cs](actions/fortuna-push.cs), Compile.
-- `Fortuna Command` — paste [actions/fortuna-command.cs](actions/fortuna-command.cs), Compile.
+- `Fortuna Push` — paste [actions/fortuna-push.cs](actions/fortuna-push.cs), then click *Save and Compile*.
+- `Fortuna Command` — paste [actions/fortuna-command.cs](actions/fortuna-command.cs), then click *Save and Compile*.
 
 Optional: `Fortuna Sidecar Start`
 ([actions/fortuna-sidecar-start.cs](actions/fortuna-sidecar-start.cs), needs a
@@ -98,7 +98,8 @@ action, as described below.
 2. Stop the sidecar by closing its window. If `Fortuna Sidecar Start` launched it,
    end its `node.exe` in Task Manager: it has no window, and a new copy exits
    without replacing a running one.
-3. Paste the current `fortuna-command.cs` into the action and click Compile.
+3. Paste the current `fortuna-command.cs` into the action and click *Save and Compile*.
+   *Compile* alone only tests the code and doesn't save it.
 4. If you added a *Set Argument* for `command` or `value` inside `Fortuna Command`,
    delete it and use a separate action, as described below. Updating doesn't remove it.
 5. Start the sidecar again, reload the control page and any OBS docks, and refresh
