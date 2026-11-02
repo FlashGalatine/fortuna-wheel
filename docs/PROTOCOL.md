@@ -32,6 +32,10 @@ wheel-specific** — a Magic 8-ball theme is a valid consumer (docs/THEMING.md).
   "spin": {
     "spinId": "s_mrn41x2a",
     "entryCount": 8,
+    "segments": [
+      { "label": "Win with no jumping", "tag": "bad" },
+      { "label": "chatter_99", "tag": "good" }
+    ],
     "selectedIndex": 3,
     "selectedEntry": { "id": "e_c3d4", "label": "chatter_99", "tag": "good", "source": "chat" },
     "seed": 987654321,
@@ -50,9 +54,20 @@ wheel-specific** — a Magic 8-ball theme is a valid consumer (docs/THEMING.md).
   `durationMs` (plus a 300 ms grace so every client's animation has finished).
   If `removeOnDraw` / per-spin `removeAfter` is set, the drawn entry is removed
   in the same revealed broadcast.
-- `entryCount` freezes the segment count at spin time (the list can shrink
-  afterwards); `selectedEntry` is embedded so the reveal survives entry
-  mutations.
+- `entryCount` and `segments` freeze the wheel at spin time: the slice count, and
+  each slice's `label` and `tag` in order. `selectedEntry` is embedded so the reveal
+  survives entry mutations. `entries` stays live, because commands still work during
+  a spin and removeOnDraw takes the winner off at the reveal. **A surface that draws
+  the slices paints `segments`, not `entries`, until the reveal is over:** the
+  rotation only lands on the winner on that list. `paintedEntries()` in
+  overlay/spin-math.js makes the choice.
+- A reveal is over once anything changes after it. The revealed block carries
+  `revealRevision`, the update `revision` it was revealed at, so a higher `revision`
+  means the wheel has moved on: the overlay hides the result card and paints
+  `entries` again (`revealOnShow()` in overlay/spin-math.js). `setSettings` sends no
+  update, so it doesn't end a reveal. The card also stops replaying on a reconnect 5
+  minutes after the spin. A block without these fields, from an older sidecar, paints
+  `entries`.
 
 ### Spin determinism
 
@@ -97,6 +112,11 @@ Commands the sidecar understands (`value` is a string; JSON where noted):
 | `status` | — request a `fortuna:status` snapshot | any |
 | `__status` | reserved — the sidecar's own status relay (see below) | sidecar only |
 
+Only `spin` is refused during a spin. The list commands, `openEntries` and `entry`
+run as usual and change `entries`, so they show on the next wheel, not this one. A
+spin closes an open drawing when it starts, and `entry` is ignored until one is open
+again.
+
 **Burst warning (SB 1.0.4):** never fire several DoActions to the same action
 within a few milliseconds — Streamer.bot bleeds arguments between them.
 panel-core serializes its queue; the control page sends one batched command per
@@ -116,11 +136,29 @@ control page.
   "ready": false, "spinning": false,
   "lastSpin": { "label": "chatter_99", "tag": "good" },
   "settings": { "removeOnDraw": false, "defaultChatTag": "good" },
-  "lastError": "" }
+  "lastError": "", "lastErrorAt": null }
 ```
 
-`ready:true` = the viewer drawing filled up (max reached) or timed out — the
-control page pulses the Spin button.
+`ready:true` = a viewer drawing closed with entries on the wheel: it filled up
+(max reached), timed out, or was closed by hand. The control page pulses the Spin
+button. It clears when a spin starts, a drawing opens, `clearEntries` runs, or the
+wheel empties any other way.
+
+`lastError` is the latest failure: a refused command, or one that threw. A launch
+with no window has no log to read, so this note can be the only record, and it stays
+until someone who can see it has acted.
+
+- **What clears it:** the next `addEntry`, `removeEntry`, `setTag`, `clearEntries`,
+  `setEntries`, `openEntries`, `closeEntries`, `spin`, `removeDrawn` or `setSettings`
+  with no `user`, such as a control page click or a Stream Deck action. If that
+  command fails too, its own failure becomes the note. A sidecar restart also clears
+  it, because it isn't saved.
+- **What doesn't:** chat commands, `!entry` and redeems, which can land while nobody
+  is looking; the page's own `status` probes, which run every 10 seconds regardless;
+  an unknown command; and the timers behind a reveal or a timed drawing.
+
+`lastErrorAt` is when it happened (an ISO time, `null` with no note). The control
+page shows it, so an old note reads as a past event and not a current fault.
 
 ## `fortuna:error`
 

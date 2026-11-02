@@ -110,6 +110,16 @@ body
     └── #entries-banner.entries-banner   "!entry · N / max entered"
 ```
 
+## A theme that draws its own slices
+
+Paint `spin.segments` during a spin, not `entries`. The list can change while the
+wheel turns, and `removeOnDraw` changes it at the reveal, but the rotation only lands
+on the winner on the list it was worked out for. Load `spin-math.js` and call
+`FortunaSpinMath.paintedEntries(payload, Date.now())` for the slices to paint, and
+`FortunaSpinMath.revealOnShow(payload, Date.now())` to decide whether to show the
+result (docs/PROTOCOL.md). A theme that only shows `selectedEntry`, like the 8-ball
+below, needs neither.
+
 ## Tutorial: a Magic 8-ball theme from scratch
 
 The payload is presentation-agnostic (docs/PROTOCOL.md): **any HTML page that

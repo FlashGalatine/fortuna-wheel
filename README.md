@@ -99,7 +99,8 @@ action, as described below.
    end its `node.exe` in Task Manager: it has no window, and a new copy exits
    without replacing a running one.
 3. Paste the current `fortuna-command.cs` into the action and click Compile.
-4. Start the sidecar again, and reload the control page and any OBS docks.
+4. Start the sidecar again, reload the control page and any OBS docks, and refresh
+   the wheel's browser source.
 
 **Set a cooldown of at least 10 seconds on a spin reward** (in its Twitch
 settings). A spin takes up to about 8 seconds, and a redeem is refused while the
@@ -138,7 +139,9 @@ launches harmless.
 1. Add entries on the control page (or `setEntries` your own list) and tag them.
 2. **SPIN.** The result card pops with the tag's effect. “Remove it from the
    wheel” appears under the last draw; or tick *remove the drawn entry
-   afterwards* / the always-on setting for elimination-style wheels.
+   afterwards* / the always-on setting for elimination-style wheels. The wheel
+   stays on the winner until the next change to it, which clears the card and shows
+   the current list. Changes made during a spin go on the next wheel.
 3. **Viewer drawings**: set max entries and/or a time window, click *Open
    entries*, and chat joins with `!entry`. When it fills up or times out the
    Spin button pulses — the spin itself stays in your hands.
@@ -147,17 +150,19 @@ launches harmless.
 
 - `npm start` — mock Streamer.bot (HTTP :7474 + WS :8080) with a landing page;
   `/mock/fixture` broadcasts a sample wheel, POST `/mock/push` any payload.
-- `npm run verify` — 167 offline checks: spin math determinism, the real
+- `npm run verify` — 214 offline checks: spin math determinism, the real
   panel-core against the mock (subscribe case, sync replay, serialized queue),
   HTTP maps, the mock's copy of the action's mapping, a real sidecar E2E (entry CRUD,
-  `!entry` dedupe/limits, spin lifecycle, channel point redeems, hostile chat JSON,
-  restart persistence), and the real `fortuna-command.cs` against a stub `CPH`. Those last 43
+  `!entry` dedupe/limits, spin lifecycle, list changes during a spin, channel point
+  redeems, the Drawing ready flag and error note, hostile chat JSON, restart
+  persistence), and the real `fortuna-command.cs` against a stub `CPH`. Those last 43
   need the .NET Framework's `csc.exe` and are reported as skipped without it; they
   prove the action's logic, not real Streamer.bot behavior. Uses off-default ports
   (7478/8084/7494) so it runs beside a live SB.
 - `npm run verify:render` — real-pixel checks in a system Edge/Chrome
   (`npm i --no-save playwright-core` first): painted wheel, revealed draw with
-  confetti on the fx layer, control page. Writes gitignored PNGs.
+  confetti on the fx layer, control page, and where the pointer stops with the real
+  sidecar running. Writes gitignored PNGs.
 - `npm run shots` — regenerates the docs screenshots.
 
 ## Ports

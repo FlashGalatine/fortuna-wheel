@@ -1,18 +1,22 @@
 // Real-pixel render verification — drives the untouched overlay + control page
 // in a real Chromium (system Edge/Chrome via playwright-core; nothing bundled)
 // against the mock SB server, injects the sample fixture, and asserts the DOM +
-// canvas. Writes test-render-wheel.png / test-render-reveal.png /
+// canvas. The last scene runs the real sidecar, to see where the pointer stops. Writes
+// test-render-wheel.png / test-render-reveal.png / test-render-landing.png /
 // control-render.png (gitignored). Run: npm run verify:render
 // First time: npm i --no-save playwright-core
 
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HTTP_PORT = 7478;
 const WS_PORT = 8084;
+const GUARD_PORT = 7494;
 const HTTP = `http://127.0.0.1:${HTTP_PORT}`;
 
 let pass = 0, fail = 0;
@@ -56,6 +60,8 @@ const canvasCoverage = (page, sel) => page.locator(sel).evaluate((el) => {
 await fetch(`${HTTP}/mock/push`, { method: 'POST', body: JSON.stringify(sample) });
 
 let browser = null;
+let sidecar = null;
+const cfgDir = mkdtempSync(resolve(tmpdir(), 'fortuna-render-'));
 try {
   for (const channel of ['msedge', 'chrome', undefined]) {
     try { browser = await chromium.launch({ channel }); break; } catch { /* next */ }
@@ -171,13 +177,130 @@ try {
     check('control: a quoted label reads back unchanged', attrs.id === quoted && attrs.title === quoted && attrs.text === quoted, JSON.stringify(attrs));
     await page.close();
   }
+
+  // ── Scene 4: the real sidecar — where the pointer stops, and the control page's notices ──
+  {
+    const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+    // Records what the real draw() puts on the canvas, so the label under the pointer is
+    // read from the paint calls and not worked out from the payload.
+    await page.addInitScript(() => {
+      const proto = CanvasRenderingContext2D.prototype;
+      const onWheel = (name, fn) => {
+        const orig = proto[name];
+        proto[name] = function (...args) { if (this.canvas.id === 'wheel') fn(...args); return orig.apply(this, args); };
+      };
+      onWheel('clearRect', () => { window.__frame = { rotation: null, labels: [] }; });
+      onWheel('rotate', (r) => { if (window.__frame.rotation === null) window.__frame.rotation = r + Math.PI / 2; });
+      onWheel('fillText', (text) => { window.__frame.labels.push(text); });
+    });
+    await page.goto(`${HTTP}/fortuna-overlay/wheel.html?sbport=${WS_PORT}`);
+    await page.waitForFunction(() => !document.body.classList.contains('offline'), null, { timeout: 8000 });
+    await sleep(600); // the replay from connecting lands first, so the next update is the sidecar's
+
+    // Resolves on the next update whose spin is in this state, or on any update if none is given.
+    const nextUpdate = (state) => page.evaluate((want) => new Promise((res) => {
+      const timer = setTimeout(() => res(false), 8000);
+      const on = (e) => {
+        if (want && e.detail.spin?.state !== want) return;
+        clearTimeout(timer);
+        window.removeEventListener('fortuna:update', on);
+        res(true);
+      };
+      window.addEventListener('fortuna:update', on);
+    }), state);
+    const send = (command, value) => page.evaluate(([c, v]) => window.__FORTUNA_SEND_COMMAND(c, v), [command, value ?? '']);
+    const resting = () => page.evaluate(() => {
+      const f = window.__frame;
+      return {
+        slices: f.labels.length,
+        under: f.labels[window.FortunaSpinMath.segmentAt(f.rotation, f.labels.length)],
+        card: document.getElementById('reveal').hidden ? null : document.getElementById('reveal-label').textContent,
+      };
+    });
+    // One whole spin of a fresh 8-slice wheel, with an optional command while it's in the air.
+    const spinThrough = async (spinValue, during) => {
+      const listed = nextUpdate();
+      await send('setEntries', JSON.stringify(Array.from({ length: 8 }, (_, i) => ({ label: `S${i + 1}` }))));
+      await listed;
+      const spinning = nextUpdate('spinning');
+      await send('spin', spinValue);
+      await spinning;
+      const revealed = nextUpdate('revealed');
+      if (during) await during();
+      await revealed;
+      return resting();
+    };
+
+    const seeded = nextUpdate();
+    const cfgPath = resolve(cfgDir, 'config.json');
+    writeFileSync(cfgPath, JSON.stringify({ entries: [], settings: { removeOnDraw: false, defaultChatTag: 'good' }, revision: 0 }));
+    sidecar = spawn(process.execPath, [resolve(__dirname, 'fortuna-sidecar.mjs')], {
+      env: { ...process.env, SB_WS_URL: `ws://127.0.0.1:${WS_PORT}/`, FORTUNA_CONFIG: cfgPath, FORTUNA_GUARD_PORT: String(GUARD_PORT), FORTUNA_SPIN_MS: '700' },
+      stdio: ['ignore', 'ignore', 'inherit'],
+    });
+    await seeded;
+
+    const onWinner = (r, slices) => r.card !== null && r.under === r.card && r.slices === slices;
+    for (const [name, during] of [
+      ['addEntry', () => send('addEntry', 'Late')],
+      ['removeEntry', () => send('removeEntry', 'S8')],
+      ['setEntries', () => send('setEntries', '[{"label":"A"},{"label":"B"},{"label":"C"}]')],
+      ['clearEntries', () => send('clearEntries', 'all')],
+    ]) {
+      const r = await spinThrough('', during);
+      check(`wheel: ${name} during a spin leaves the pointer on the winner`, onWinner(r, 8), JSON.stringify(r));
+    }
+
+    // Removing the winner at the reveal mustn't move the wheel under the card that names it.
+    const rRemoved = await spinThrough('{"removeAfter":true}');
+    check('wheel: removeAfter leaves the pointer on the winner', onWinner(rRemoved, 8), JSON.stringify(rRemoved));
+    await page.screenshot({ path: resolve(__dirname, 'test-render-landing.png') });
+
+    // The next change ends the reveal: the card goes, and the wheel shows the live list.
+    const moved = nextUpdate();
+    await send('addEntry', 'Next round');
+    await moved;
+    const rMoved = await resting();
+    check('wheel: the next change ends the reveal and paints the live list', rMoved.card === null && rMoved.slices === 8, JSON.stringify(rMoved));
+    const painted = await page.evaluate(() => window.__frame.labels);
+    check('wheel: the live list has the winner gone and the new entry on', painted.includes('Next round') && !painted.includes(rRemoved.card), JSON.stringify(painted));
+
+    const control = await browser.newPage({ viewport: { width: 700, height: 1000 } });
+    await control.goto(`${HTTP}/fortuna-shared/control.html?sbport=${WS_PORT}`);
+    await control.waitForFunction(() => document.getElementById('status').textContent.includes('Entries:'), null, { timeout: 8000 });
+
+    // 'Drawing ready' belongs to a wheel with something on it.
+    await send('openEntries', '{"maxEntries":5,"windowSec":0}');
+    await send('closeEntries');
+    await control.waitForSelector('body.ready .ready-banner', { timeout: 5000 });
+    check('control: Drawing ready shows after a close with entries', await control.locator('.ready-banner').isVisible());
+    await send('setEntries', '[]');
+    await control.waitForFunction(() => !document.body.classList.contains('ready'), null, { timeout: 5000 }).catch(() => {});
+    check('control: Drawing ready goes when the wheel empties', !(await control.locator('.ready-banner').isVisible()));
+
+    // The error note says when it happened, and clears once someone at the page has acted.
+    const note = () => control.locator('#status .err').allTextContents();
+    await send('removeEntry', 'no such entry');
+    await control.waitForSelector('#status .err', { timeout: 5000 });
+    const shown = (await note()).join('');
+    check('control: a failure shows a note and when it happened', shown.includes('no such entry') && /\(at .+\)/.test(shown), shown);
+    await control.fill('#new-label', 'Back to work');
+    await control.click('#btn-add');
+    await control.waitForFunction(() => !document.querySelector('#status .err'), null, { timeout: 5000 }).catch(() => {});
+    check('control: a click that works clears the note', (await note()).length === 0, JSON.stringify(await note()));
+    await control.close();
+    await page.close();
+  }
 } catch (err) {
   fail++;
   console.error(`\nFATAL: ${err.stack || err}`);
 } finally {
   try { await browser?.close(); } catch {}
+  try { sidecar?.kill(); } catch {}
   try { mock.kill(); } catch {}
+  await sleep(200); // the sidecar lets go of its config before the folder goes
+  try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* it's in the temp folder */ }
 }
 
-console.log(`\n${fail === 0 ? 'ALL GREEN' : 'FAILURES'} — ${pass} passed, ${fail} failed (screenshots: test-render-wheel.png, test-render-reveal.png, control-render.png)`);
+console.log(`\n${fail === 0 ? 'ALL GREEN' : 'FAILURES'} — ${pass} passed, ${fail} failed (screenshots: test-render-wheel.png, test-render-reveal.png, test-render-landing.png, control-render.png)`);
 process.exit(fail === 0 ? 0 : 1);

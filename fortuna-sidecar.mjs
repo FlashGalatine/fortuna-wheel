@@ -60,8 +60,9 @@ let config = {
 let activeSpin = null; // in-flight spin block (state:"spinning") + its timers
 let revealTimer = null;
 let windowTimer = null;
-let entriesReady = false; // viewer drawing filled up / timed out — control page highlights Spin
-let lastError = '';
+let entriesReady = false; // viewer drawing closed with entries on the wheel — control page highlights Spin
+let lastError = ''; // the latest failure, kept until someone at the control page has acted (dispatch)
+let lastErrorAt = null;
 
 let sbWs = null;
 let sbReconnectTimer = null;
@@ -212,6 +213,7 @@ function pushStatus() {
     lastSpin: config.lastSpin ? { label: config.lastSpin.selectedEntry.label, tag: config.lastSpin.selectedEntry.tag } : null,
     settings: { ...config.settings },
     lastError,
+    lastErrorAt,
   };
   // The reserved pair wins in the C# action, so a Set Argument for `command` inside
   // it can't turn this into a spin. `command`/`value` keep older actions working, at
@@ -221,14 +223,20 @@ function pushStatus() {
 }
 
 function applyChange() {
+  if (!config.entries.length) entriesReady = false; // nothing left to spin, however it emptied
   config.revision++;
   persist();
   pushUpdate();
   pushStatus();
 }
 
-function fail(msg) {
+function noteError(msg) {
   lastError = msg;
+  lastErrorAt = new Date().toISOString();
+}
+
+function fail(msg) {
+  noteError(msg);
   log(msg);
   pushStatus();
 }
@@ -315,6 +323,9 @@ function spin(opts) {
   activeSpin = {
     spinId: newId('s'),
     entryCount: n, // segment count frozen at spin time — removeOnDraw mutates the list after
+    // What the wheel shows until the reveal is over. Commands stay open during a spin, so
+    // the live list can change under it, and removeOnDraw changes it at the reveal.
+    segments: config.entries.map(({ label, tag }) => ({ label, tag })),
     selectedIndex,
     selectedEntry: { ...config.entries[selectedIndex] },
     seed,
@@ -328,7 +339,6 @@ function spin(opts) {
     state: 'spinning',
   };
   entriesReady = false;
-  lastError = '';
   log(`SPIN → [${selectedIndex}] "${activeSpin.selectedEntry.label}" (${activeSpin.selectedEntry.tag}), ${activeSpin.durationMs}ms, ${activeSpin.extraSpins} turns${removeAfter ? ', remove after' : ''}`);
   applyChange();
 
@@ -340,7 +350,9 @@ function spin(opts) {
 
 function reveal(removeAfter) {
   if (!activeSpin) return;
-  config.lastSpin = { ...activeSpin, state: 'revealed' };
+  // The revision applyChange() below gives this reveal. A later one means something changed
+  // after it, and the overlay stops showing it.
+  config.lastSpin = { ...activeSpin, state: 'revealed', revealRevision: config.revision + 1 };
   activeSpin = null;
   if (removeAfter) removeEntryById(config.lastSpin.selectedEntry.id);
   log(`REVEALED "${config.lastSpin.selectedEntry.label}"${removeAfter ? ' (removed from wheel)' : ''}`);
@@ -355,9 +367,16 @@ function removeEntryById(id) {
 
 // ── Command dispatch (inbound half of the bus) ────────────────────────────────
 
+const OPERATOR_COMMANDS = ['addEntry', 'removeEntry', 'setTag', 'clearEntries', 'setEntries', 'openEntries', 'closeEntries', 'spin', 'removeDrawn', 'setSettings'];
+
 function dispatch(command, value, user, userId) {
   if (command === '__status') return; // our own status relay echoing back
   log(`command: ${command}${value ? ' ' + value.slice(0, 120) : ''}${user ? ` (from ${user})` : ''}`);
+  // The note is the only record on a hidden launch, so only someone who can see it clears
+  // it: the next operator command with no chat user behind it. If that command fails, it
+  // sets a new note. Chat, redeems and the page's own status probes can all run while
+  // nobody is looking (docs/PROTOCOL.md).
+  if (!user && OPERATOR_COMMANDS.includes(command)) { lastError = ''; lastErrorAt = null; }
   switch (command) {
     case 'addEntry': {
       // JSON {label, tag} from the control page, or plain chat text
@@ -478,7 +497,7 @@ function connectSb() {
       try {
         dispatch(String(d.command ?? ''), String(d.value ?? ''), d.user == null ? '' : String(d.user), d.userId == null ? '' : String(d.userId));
       } catch (err) {
-        lastError = `a command failed: ${err?.message ?? err}`;
+        noteError(`a command failed: ${err?.message ?? err}`);
         log(`${lastError}\n${err?.stack ?? err}`);
         try { pushStatus(); } catch { /* the log line is the record */ }
       }

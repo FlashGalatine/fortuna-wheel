@@ -270,7 +270,7 @@
       ` · Drawing: <b>${s.entryMode?.open ? 'OPEN' : 'closed'}</b>` +
       (s.entryMode?.open && s.entryMode.secondsLeft != null ? ` · <b>${esc(s.entryMode.secondsLeft)}s</b> left` : '') +
       ` · Spinning: <b>${s.spinning ? 'YES' : 'no'}</b>` +
-      (s.lastError ? `<br><span class="err">${esc(s.lastError)}</span>` : '');
+      (s.lastError ? `<br><span class="err">${esc(s.lastError)}${s.lastErrorAt ? ` (at ${esc(new Date(s.lastErrorAt).toLocaleTimeString())})` : ''}</span>` : '');
   });
 
   // The entry list mirrors the persisted wheel payload.

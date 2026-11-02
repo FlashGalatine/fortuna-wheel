@@ -20,12 +20,12 @@
   const ctx = canvas.getContext('2d');
 
   // Reveal replays: a reconnect re-delivers the persisted payload, which still
-  // carries the last revealed spin. The card re-shows while the reveal is
-  // recent; the effect only fires close to the actual moment (and once per spin).
-  const REVEAL_CARD_MAX_AGE_MS = 5 * 60 * 1000;
+  // carries the last revealed spin. The card re-shows while the reveal is on show
+  // (spin-math.js); the effect only fires close to the actual moment (and once per spin).
   const EFFECT_MAX_AGE_MS = 10 * 1000;
 
   let state = null; // latest fortuna:update payload
+  let painted = []; // the slices on the wheel, frozen during a spin (spin-math.js)
   let raf = null;
   let effectCancel = null;
   let effectSpinId = null;
@@ -53,7 +53,7 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size, size);
 
-    const entries = state ? state.entries : [];
+    const entries = painted;
     const n = entries.length;
     const cx = size / 2;
     const cy = size / 2;
@@ -194,6 +194,8 @@
   function apply(payload) {
     state = payload;
     const spin = payload.spin;
+    const now = Date.now();
+    painted = M.paintedEntries(payload, now);
 
     // Entries-open banner.
     if (payload.entryMode && payload.entryMode.open) {
@@ -204,13 +206,8 @@
       bannerEl.hidden = true;
     }
 
-    if (spin && spin.state === 'revealed') {
-      const age = Date.now() - (Date.parse(spin.startedAt) + spin.durationMs);
-      if (age <= REVEAL_CARD_MAX_AGE_MS) showReveal(spin);
-      else hideReveal();
-    } else {
-      hideReveal();
-    }
+    if (M.revealOnShow(payload, now)) showReveal(spin);
+    else hideReveal();
 
     animate();
   }

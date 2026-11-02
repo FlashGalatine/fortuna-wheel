@@ -1,14 +1,15 @@
 // Fortuna verify suite — no network, no Streamer.bot install, no browser.
 //   1. Spin math (the REAL overlay/spin-math.js): determinism, landing on the
-//      selected segment, jitter staying inside the winning slice.
+//      selected segment, jitter staying inside the winning slice, which slices to paint.
 //   2. Mock-SB E2E: the REAL panel-core.js runs in a browser shim against the
 //      mock server — Subscribe (lowercase), sync-on-connect replay, live push,
 //      serialized command queue.
 //   3. Mock HTTP maps, and the mock's copy of the action's mapping (same rows as 5).
 //   4. Sidecar E2E: the REAL fortuna-sidecar.mjs runs against the mock —
 //      entry CRUD, chat !entry dedupe + limits + auto-close, spin lifecycle
-//      (spinning → revealed), channel point redeems, removeOnDraw / removeDrawn,
-//      hostile chat JSON, restart persistence.
+//      (spinning → revealed), list changes during a spin, channel point redeems,
+//      removeOnDraw / removeDrawn, the Drawing ready flag, the error note, hostile chat
+//      JSON, restart persistence.
 //   5. The REAL actions/fortuna-command.cs, compiled with the .NET Framework's csc
 //      against a stub CPH (tools/action-harness.cs). Proves its logic and C# 5
 //      syntax, not real Streamer.bot behavior. Skipped when csc isn't installed.
@@ -77,6 +78,37 @@ async function testSpinMath() {
   const end = M.rotationAt(spin.durationMs, spin, 8);
   check('animation ends at the target angle',
     Math.abs(end - M.targetRotation(3, 8, spin.seed, 5)) < 1e-9, String(end));
+
+  // Which slices the overlay paints, and whether it shows the reveal card. A spin paints
+  // what it froze from launch until its reveal is over, and anything else the live list.
+  const t0 = Date.parse('2026-07-16T20:00:00.000Z');
+  const soon = t0 + 5000;
+  const lastShown = t0 + 1000 + 5 * 60 * 1000; // durationMs, then five minutes
+  const live = [{ label: 'Live', tag: 'good' }];
+  const frozen = [{ label: 'Frozen A', tag: 'bad' }, { label: 'Frozen B', tag: 'good' }];
+  const block = (extra) => ({ state: 'revealed', entryCount: 2, segments: frozen, revealRevision: 7, startedAt: new Date(t0).toISOString(), durationMs: 1000, ...extra });
+  for (const [name, blockHere, revision, now, wantFrozen, wantCard] of [
+    ['no spin yet', null, 7, soon, false, false],
+    ['a spin in the air', block({ state: 'spinning', revealRevision: undefined }), 7, soon, true, false],
+    ['a spin in the air past its duration', block({ state: 'spinning', revealRevision: undefined }), 7, lastShown + 1, true, false],
+    ['a reveal nothing has changed since', block(), 7, soon, true, true],
+    ['a reveal something has changed since', block(), 8, soon, false, false],
+    ['a reveal at its last moment', block(), 7, lastShown, true, true],
+    ['a reveal too old to replay', block(), 7, lastShown + 1, false, false],
+    ['a reveal saved before revealRevision', block({ revealRevision: undefined }), 7, soon, true, true],
+    ['a reveal saved before segments', block({ segments: undefined, revealRevision: undefined }), 7, soon, false, true],
+    ['segments that don\'t match entryCount', block({ entryCount: 3 }), 7, soon, false, true],
+    ['segments that aren\'t a list', block({ segments: 'junk' }), 7, soon, false, true],
+    ['a segment with a label that can\'t paint', block({ segments: [{ label: { toString: 1 }, tag: 'good' }, frozen[1]] }), 7, soon, false, true],
+    ['a segment with a tag that can\'t paint', block({ segments: [{ label: 'A', tag: { toString: 1 } }, frozen[1]] }), 7, soon, false, true],
+    ['a segment that isn\'t an object', block({ segments: [null, frozen[1]] }), 7, soon, false, true],
+  ]) {
+    const payload = { revision, entries: live, spin: blockHere };
+    const painted = M.paintedEntries(payload, now);
+    check(`paint: ${name} paints the ${wantFrozen ? 'frozen slices' : 'live list'}${wantCard ? ', with the card' : ''}`,
+      (wantFrozen ? painted === blockHere.segments : painted === live) && M.revealOnShow(payload, now) === wantCard,
+      JSON.stringify({ painted, card: M.revealOnShow(payload, now) }));
+  }
 }
 
 // ── Mock server helpers ───────────────────────────────────────────────────────
@@ -235,6 +267,7 @@ async function testSidecar() {
   const isStatus = (d) => d.type === 'fortuna:command' && d.command === '__status';
   const parseStatus = (d) => JSON.parse(d.value);
   const isUpdate = (d) => d.type === 'fortuna:update';
+  const M = globalThis.FortunaSpinMath;
 
   // client.next() scans the WHOLE event log; predicates that could also match an
   // earlier event need a scan of only the events after a recorded mark.
@@ -346,6 +379,8 @@ async function testSidecar() {
       && Number.isInteger(spin.seed) && spin.durationMs === SPIN_MS && spin.extraSpins >= 4
       && spin.selectedEntry?.id === uSpin.entries[spin.selectedIndex].id,
     JSON.stringify(spin));
+  check('sidecar: a spin freezes each slice\'s label and tag',
+    JSON.stringify(spin.segments) === JSON.stringify(uSpin.entries.map(({ label, tag }) => ({ label, tag }))), JSON.stringify(spin.segments));
   check('sidecar: ready cleared by spin', (await since(atSpin, isStatus).then(parseStatus)).ready === false);
 
   // Reveal lands after durationMs; the entry stays (removeOnDraw off).
@@ -480,6 +515,179 @@ async function testSidecar() {
   const atOldActionCleanup = mark();
   cmd('removeEntry', 'Old action proof');
   await since(atOldActionCleanup, (d) => isUpdate(d) && !d.entries.some((e) => e.label === 'Old action proof'));
+
+  // ── A list change during a spin ──
+  // Where the pointer stops, worked out as the overlay does: the real spin-math on each real
+  // update. verify-render checks that the overlay paints the same thing. A row only counts
+  // if its change reached the list mid-spin, and the list goes back afterwards.
+  const landedOn = (u) => {
+    const slices = M.paintedEntries(u, Date.now());
+    return slices[M.segmentAt(M.rotationAt(u.spin.durationMs, u.spin, u.spin.entryCount), slices.length)]?.label;
+  };
+  const listBeforeSpins = client.events.filter(isUpdate).pop().entries;
+  const WHEEL = Array.from({ length: 8 }, (_, i) => ({ id: `e_slice_${i + 1}`, label: `Slice ${i + 1}`, tag: 'neutral' }));
+  const resetWheel = async () => {
+    const at = mark();
+    cmd('setEntries', JSON.stringify(WHEEL));
+    await since(at, (d) => isUpdate(d) && d.entries.length === WHEEL.length);
+  };
+  // One whole spin of the wheel above, with an optional change once it's in the air.
+  const spinThrough = async (value, during) => {
+    await resetWheel();
+    const at = mark();
+    cmd('spin', value);
+    const started = await since(at, (d) => isUpdate(d) && d.spin?.state === 'spinning');
+    if (during) await during(started);
+    const revealed = await since(at, (d) => isUpdate(d) && d.spin?.state === 'revealed' && d.spin.spinId === started?.spin.spinId);
+    const updates = client.events.slice(at).filter((d) => isUpdate(d) && d.spin?.spinId === started?.spin.spinId);
+    return { started, revealed, updates, winner: started?.spin.selectedEntry.label };
+  };
+  const changedInAir = (r) => r.updates.some((u) => u.spin.state === 'spinning' && JSON.stringify(u.entries) !== JSON.stringify(r.started.entries));
+  const staysOnWinner = (r) => !!r.revealed && r.updates.every((u) => landedOn(u) === r.winner);
+  const landingDetail = (r) => JSON.stringify({ winner: r.winner, landed: r.updates.map(landedOn), states: r.updates.map((u) => u.spin.state), counts: r.updates.map((u) => u.entries.length) });
+
+  for (const [name, during] of [
+    ['addEntry', () => cmd('addEntry', '{"label":"Late","tag":"good"}')],
+    ['a mod\'s !wheel addEntry', () => cmd('!wheel', '', { commandId: 'trig-4', rawInput: 'addEntry Chat late', user: 'modfriend', userId: 'u5' })],
+    ['removeEntry', () => cmd('removeEntry', 'Slice 8')],
+    ['removing the winner', (u) => cmd('removeEntry', u.spin.selectedEntry.id)],
+    ['setEntries', () => cmd('setEntries', '[{"label":"New A"},{"label":"New B"}]')],
+    ['setEntries []', () => cmd('setEntries', '[]')],
+    ['clearEntries', () => cmd('clearEntries', 'all')],
+    ['removeDrawn', () => cmd('removeDrawn')], // the winner before this one, also on the wheel
+  ]) {
+    const r = await spinThrough('', during);
+    check(`sidecar: ${name} during a spin can't move the wheel off the winner`, changedInAir(r) && staysOnWinner(r), landingDetail(r));
+  }
+
+  // A drawing opened during a spin takes viewers straight away, for the next wheel.
+  const rJoin = await spinThrough('', async () => {
+    const atOpen = mark();
+    cmd('openEntries', '{"maxEntries":10,"windowSec":0}');
+    await since(atOpen, (d) => isUpdate(d) && d.entryMode.open);
+    cmd('!entry', '', { commandId: 'trig-5', rawInput: '', user: 'mid_spin_viewer', userId: 'u808' });
+  });
+  const joinedLive = rJoin.revealed?.entries.some((e) => e.user === 'mid_spin_viewer');
+  check('sidecar: a viewer\'s !entry joins a drawing opened during a spin', changedInAir(rJoin) && joinedLive && rJoin.revealed.entryMode.open, landingDetail(rJoin));
+  check('sidecar: that viewer waits for the next wheel', staysOnWinner(rJoin)
+    && !M.paintedEntries(rJoin.revealed, Date.now()).some((e) => e.label === 'mid_spin_viewer'), landingDetail(rJoin));
+  const atJoinClose = mark();
+  cmd('closeEntries');
+  await since(atJoinClose, (d) => isUpdate(d) && !d.entryMode.open);
+
+  // Taking the winner off at the reveal mustn't move the wheel under the card that names it.
+  const rGone = await spinThrough('{"removeAfter":true}');
+  const goneNow = rGone.revealed && !rGone.revealed.entries.some((e) => e.label === rGone.winner) && rGone.revealed.entries.length === WHEEL.length - 1;
+  check('sidecar: removeAfter leaves the wheel on the winner', goneNow && staysOnWinner(rGone) && M.revealOnShow(rGone.revealed, Date.now()), landingDetail(rGone));
+
+  // The next change ends the reveal, and the wheel shows the live list again.
+  const liveAfterChange = (u) => JSON.stringify(M.paintedEntries(u, Date.now()).map((e) => e.label)) === JSON.stringify(u.entries.map((e) => e.label));
+  const atNext = mark();
+  cmd('addEntry', 'Next round');
+  const uNext = await since(atNext, (d) => isUpdate(d) && d.entries.some((e) => e.label === 'Next round'));
+  check('sidecar: the next change ends a reveal', !!uNext && !M.revealOnShow(uNext, Date.now()) && liveAfterChange(uNext), JSON.stringify(uNext?.spin ?? null));
+  const rKept = await spinThrough('');
+  const atDrawnGone = mark();
+  cmd('removeDrawn');
+  const uDrawnGone = await since(atDrawnGone, (d) => isUpdate(d) && !d.entries.some((e) => e.label === rKept.winner));
+  check('sidecar: removeDrawn ends a reveal', !!uDrawnGone && !M.revealOnShow(uDrawnGone, Date.now()) && liveAfterChange(uDrawnGone), JSON.stringify(uDrawnGone?.spin ?? null));
+
+  // ── Drawing ready ──
+  // It means there's a drawing to spin, so it can't outlast the last entry.
+  for (const [name, empty] of [
+    ['setEntries []', () => cmd('setEntries', '[]')],
+    ['removing the last entry', () => cmd('removeEntry', 'Only one')],
+  ]) {
+    const atOne = mark();
+    cmd('setEntries', '[{"label":"Only one"}]');
+    await since(atOne, (d) => isUpdate(d) && d.entries.length === 1);
+    cmd('openEntries');
+    cmd('closeEntries');
+    const lit = await since(atOne, (d) => isStatus(d) && parseStatus(d).ready);
+    const atEmpty = mark();
+    empty();
+    const sEmpty = await since(atEmpty, isStatus).then((d) => d && parseStatus(d));
+    check(`sidecar: ${name} takes Drawing ready with it`, !!lit && sEmpty?.entryCount === 0 && sEmpty.ready === false, JSON.stringify(sEmpty));
+  }
+
+  // ── The error note ──
+  // On a hidden launch it's the only record of a failure, so what clears it is someone at
+  // the control page acting after it, and nothing that can happen while nobody is looking.
+  let noteProbes = 0;
+  const statusAfter = async (send) => {
+    const at = mark();
+    await send();
+    const probe = `note_${++noteProbes}`;
+    cmd('status', probe);
+    for (let i = 0; i < 40; i++) {
+      const from = client.events.findIndex((d, j) => j >= at && d.command === 'status' && d.value === probe);
+      if (from >= 0 && client.events.slice(from).some(isStatus)) break;
+      await sleep(50);
+    }
+    await sleep(100); // the command's own status can land first, so let the probe's reply in
+    return parseStatus(client.events.filter(isStatus).pop());
+  };
+  const NOTE = 'removeEntry: no entry "no_such_note"';
+  const raiseNote = () => statusAfter(() => cmd('removeEntry', 'no_such_note'));
+  const atChatOpen = mark();
+  cmd('!wheel', '', { commandId: 'trig-6', rawInput: 'openEntries {"maxEntries":50,"windowSec":0}', user: 'modfriend', userId: 'u5' });
+  await since(atChatOpen, (d) => isUpdate(d) && d.entryMode.open);
+  const sRaised = await raiseNote();
+  check('sidecar: a failure sets the note and when it happened',
+    sRaised.lastError === NOTE && Math.abs(Date.now() - Date.parse(sRaised.lastErrorAt)) < 60000, JSON.stringify(sRaised));
+
+  for (const [name, send] of [
+    ['a status probe', () => {}],
+    ['an unknown command', () => cmd('doABarrelRoll', '42')],
+    ['a viewer\'s !entry', async () => {
+      const at = mark();
+      cmd('!entry', '', { commandId: 'trig-7', rawInput: '', user: 'note_viewer', userId: 'u909' });
+      return since(at, (d) => isUpdate(d) && d.entries.some((e) => e.userId === 'u909'));
+    }],
+    ['a mod\'s !wheel command that works', async () => {
+      const at = mark();
+      cmd('!wheel', '', { commandId: 'trig-8', rawInput: 'addEntry Mod entry', user: 'modfriend', userId: 'u5' });
+      return since(at, (d) => isUpdate(d) && d.entries.some((e) => e.label === 'Mod entry'));
+    }],
+    ['a redeem\'s spin', async () => {
+      const at = mark();
+      redeem('');
+      const started = await since(at, (d) => isUpdate(d) && d.spin?.state === 'spinning');
+      return since(at, (d) => isUpdate(d) && d.spin?.state === 'revealed' && d.spin.spinId === started?.spin.spinId);
+    }],
+  ]) {
+    let proof = true;
+    const after = await statusAfter(async () => { proof = (await send()) ?? true; });
+    check(`sidecar: the note survives ${name}`, !!proof && after.lastError === NOTE && after.lastErrorAt === sRaised.lastErrorAt, JSON.stringify(after));
+  }
+
+  // Everything an operator can send, each from a fresh note, with no chat user behind it.
+  await resetWheel();
+  for (const [command, value] of [
+    ['addEntry', 'Page entry'],
+    ['removeEntry', 'Page entry'],
+    ['setTag', '{"label":"Slice 1","tag":"good"}'],
+    ['setEntries', JSON.stringify(WHEEL)],
+    ['clearEntries', 'chat'],
+    ['openEntries', ''],
+    ['closeEntries', ''],
+    ['spin', ''],
+    ['removeDrawn', ''],
+    ['setSettings', '{"defaultChatTag":"good"}'],
+  ]) {
+    await raiseNote();
+    const at = mark();
+    const after = await statusAfter(() => cmd(command, value));
+    check(`sidecar: ${command} that works clears the note`, after.lastError === '' && after.lastErrorAt === null, JSON.stringify(after));
+    if (command === 'spin') {
+      const started = await since(at, (d) => isUpdate(d) && d.spin?.state === 'spinning');
+      await since(at, (d) => isUpdate(d) && d.spin?.state === 'revealed' && d.spin.spinId === started?.spin.spinId);
+    }
+  }
+
+  const atListBack = mark();
+  cmd('setEntries', JSON.stringify(listBeforeSpins));
+  await since(atListBack, (d) => isUpdate(d) && JSON.stringify(d.entries) === JSON.stringify(listBeforeSpins));
 
   // setSettings batch.
   cmd('setSettings', JSON.stringify({ removeOnDraw: true, defaultChatTag: 'neutral' }));
@@ -634,6 +842,21 @@ async function testSidecar() {
   check('sidecar: restart restores last revealed spin',
     uRestart?.spin?.state === 'revealed' && uRestart.spin.spinId === lastSpinBefore.spinId, JSON.stringify(uRestart?.spin ?? null));
   check('sidecar: entry window never restarts open', uRestart?.entryMode.open === false);
+
+  // A reveal nothing has changed since comes back on show, with the wheel still on the
+  // winner. removeOnDraw is on by now, so the winner has already gone from the list.
+  const rStanding = await spinThrough('');
+  const standingRevision = rStanding.revealed?.revision;
+  for (let i = 0; i < 50 && (await readFile(cfgPath, 'utf-8').then(JSON.parse).then((saved) => saved.revision).catch(() => null)) !== standingRevision; i++) await sleep(100);
+  sidecarProc.kill();
+  await sleep(400);
+  const atStanding = mark();
+  sidecarProc = spawnSidecar(cfgPath);
+  const uStanding = await since(atStanding, isUpdate, 5000);
+  check('sidecar: a restart brings a standing reveal back, on the winner',
+    !!uStanding && M.revealOnShow(uStanding, Date.now()) && landedOn(uStanding) === rStanding.winner
+      && !uStanding.entries.some((e) => e.label === rStanding.winner) && uStanding.entries.length === WHEEL.length - 1,
+    JSON.stringify({ winner: rStanding.winner, spin: uStanding?.spin ?? null, entries: uStanding?.entries.length }));
 
   client.ws.close();
   await rm(cfgPath, { force: true });
