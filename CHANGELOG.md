@@ -38,14 +38,21 @@ traceability.
 - **Viewer text could forge lines in the sidecar's log.** A newline or terminal escape
   in a label, typed as `\n` or `\u001b` in `!wheel` JSON, reached the log as the real
   character. Control characters now print escaped, so one log call stays one line.
+- **A settings change didn't reach `fortuna:update`.** `setSettings` only sent a status,
+  so a custom overlay reading `settings` from the update, or connecting later and getting
+  the replay, saw the old values until the next change. It now pushes an update like every
+  other change.
 
 ### Documentation
 
 - Setup and update steps said to click Compile, which only tests the code. A reader
   who stopped there kept the old action. They now say Save and Compile, including in
   the 1.0.12 notes below.
+- Corrected what the docs say about the code: the control page shows the draw as text and
+  has no wheel of its own, it never sends `setEntries`, `spin` stays non-null after the
+  first draw, and an unknown command or an ignored `entry` gets no status back.
 
-Verified offline: `verify` 230/230. None of these fixes has run on a live Streamer.bot.
+Verified offline: `verify` 231/231. None of these fixes has run on a live Streamer.bot.
 
 ## [1.0.12] — 2026-11-01
 

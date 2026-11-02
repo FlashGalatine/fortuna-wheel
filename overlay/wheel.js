@@ -1,7 +1,7 @@
 // wheel — the Fortuna overlay renderer. Consumes fortuna:update CustomEvents
 // (dispatched by panel-core.js), paints the wheel on a canvas, and derives the
 // spin animation deterministically from the sidecar's spin block so every OBS
-// source and the control preview land on the same slice at the same moment.
+// source lands on the same slice at the same moment.
 //
 // The canvas reads its palette from the CSS custom properties in wheel.css, so
 // themes recolor it without touching JS (docs/THEMING.md). Reveal effects are

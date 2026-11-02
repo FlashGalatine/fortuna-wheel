@@ -1,17 +1,18 @@
 // Fortuna sidecar — the one Node process. Owns the wheel: the entry list, the
 // viewer-entry window, and — critically — the spin decision. The winner and the
-// spin parameters are picked HERE, once, and broadcast; every overlay and the
-// control page derive the identical animation from them, so all surfaces agree.
+// spin parameters are picked HERE, once, and broadcast; every overlay derives the
+// identical animation from them, so all OBS sources agree.
 //
 //   outbound  on every state change → DoAction "Fortuna Push" with the
 //             pre-serialized `fortunaPayload` (docs/PROTOCOL.md); the C# action
 //             persists it to the `fortuna.payload` global and broadcasts it.
-//             After every command → a fortuna:status snapshot for the control
-//             page. Status is ephemeral and must not clobber the persisted
-//             update payload, so it rides the "Fortuna Command" relay as the
-//             reserved command "__status" (value = status JSON); the control
-//             page unwraps it and the sidecar ignores its own echo. No third SB
-//             action needed.
+//             After a state change or a failed command → a fortuna:status
+//             snapshot for the control page. An unknown command and an ignored
+//             "entry" send none. Status is ephemeral and must not clobber the
+//             persisted update payload, so it rides the "Fortuna Command" relay
+//             as the reserved command "__status" (value = status JSON); the
+//             control page unwraps it and the sidecar ignores its own echo. No
+//             third SB action needed.
 //   inbound   subscribes to General.Custom and consumes
 //             { type:'fortuna:command', command, value, user?, userId? }
 //             broadcasts emitted by the control page, chat triggers and reward
@@ -408,7 +409,7 @@ function dispatch(command, value, user, userId) {
   switch (command) {
     case 'addEntry': {
       // JSON {label, tag} from the control page, or plain chat text
-      // ("!wheel add Run it back | bad" — an optional trailing "| tag").
+      // ("!wheel addEntry Run it back | bad" — an optional trailing "| tag").
       const o = parseJson(value);
       let label, tag;
       if (o && typeof o === 'object') { label = o.label; tag = o.tag; }
@@ -446,9 +447,9 @@ function dispatch(command, value, user, userId) {
       applyChange();
       return;
     }
-    // Batched full-list replace — the control page sends ONE of these per save so
-    // it never fires a burst of DoActions (Streamer.bot bleeds arguments between
-    // action invocations that arrive within a few ms).
+    // Batched full-list replace — a caller sends ONE of these instead of a burst of
+    // DoActions (Streamer.bot bleeds arguments between action invocations that arrive
+    // within a few ms).
     case 'setEntries': {
       const arr = parseJson(value);
       if (!Array.isArray(arr)) { fail('setEntries: expected a JSON array'); return; }
@@ -475,8 +476,7 @@ function dispatch(command, value, user, userId) {
         if (o.removeOnDraw !== undefined) config.settings.removeOnDraw = o.removeOnDraw === true || o.removeOnDraw === 'true';
         if (o.defaultChatTag !== undefined && TAGS.includes(o.defaultChatTag)) config.settings.defaultChatTag = o.defaultChatTag;
       }
-      persist();
-      pushStatus();
+      applyChange();
       return;
     }
     case 'status': pushStatus(); return;
@@ -511,8 +511,9 @@ function connectSb() {
       if (!(m && m.event && m.event.source === 'General' && m.event.type === 'Custom')) return;
       let d = m.data;
       if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
-      // Echo-loop guard: this client also hears its own fortuna:update /
-      // fortuna:status broadcasts. Consume ONLY the command channel.
+      // Echo-loop guard: this client also hears its own fortuna:update broadcasts.
+      // Consume ONLY the command channel. Its own status arrives there too, as
+      // "__status", and dispatch() drops it.
       if (!d || typeof d !== 'object' || d.type !== 'fortuna:command') return;
       // The String() calls belong inside the try. The action only relays strings, so a field
       // that throws here marks a bad relay, and running it with that field blank could do

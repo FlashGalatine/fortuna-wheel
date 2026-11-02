@@ -45,8 +45,12 @@ wheel-specific** — a Magic 8-ball theme is a valid consumer (docs/THEMING.md).
 
 - `tag` is `good | bad | neutral` — it selects the reveal effect (confetti /
   rain / glow).
-- `spin` is `null` when idle. The sidecar broadcasts once with
-  `state:"spinning"` at spin start and again with `state:"revealed"` after
+- `spin` is `null` until the first draw. After that it holds the in-flight block
+  (`state:"spinning"`) or the last revealed block (`state:"revealed"`): every later
+  update re-carries the revealed block, including after `clearEntries` and a sidecar
+  restart. Compare `spinId` to tell a new draw from a re-carried one;
+  `fortuna:status.spinning` says whether a spin is in flight. The sidecar broadcasts
+  once with `state:"spinning"` at spin start and again with `state:"revealed"` after
   `durationMs` (plus a 300 ms grace so every client's animation has finished).
   If `removeOnDraw` / per-spin `removeAfter` is set, the drawn entry is removed
   in the same revealed broadcast.
@@ -57,7 +61,7 @@ wheel-specific** — a Magic 8-ball theme is a valid consumer (docs/THEMING.md).
 ### Spin determinism
 
 The winner and every animation parameter are decided ONCE, in the sidecar.
-Every surface derives the identical animation (overlay/spin-math.js):
+Every overlay / OBS source derives the identical animation (overlay/spin-math.js):
 
 ```
 seg           = 2π / entryCount
@@ -87,7 +91,7 @@ Commands the sidecar understands (`value` is a string; JSON where noted):
 | `removeEntry` | entry id or exact label (case-insensitive) | control page |
 | `setTag` | JSON `{id, tag}` | control page |
 | `clearEntries` | `all` \| `chat` \| `streamer` | control page |
-| `setEntries` | JSON array of `{label, tag?, source?, user?, userId?, id?}` — batched full replace; `[]` clears, and a list with nothing usable in it is refused. An `id` is kept only if it looks like one the sidecar made (`e_…`) and no earlier row holds it; any other row gets a new one | control page |
+| `setEntries` | JSON array of `{label, tag?, source?, user?, userId?, id?}` — batched full replace; `[]` clears, and a list with nothing usable in it is refused. An `id` is kept only if it looks like one the sidecar made (`e_…`) and no earlier row holds it; any other row gets a new one | `!wheel setEntries …` / your own scripts |
 | `openEntries` | JSON `{maxEntries?, windowSec?}` | control page / `!wheel openEntries` |
 | `closeEntries` | — | control page / `!wheel closeEntries` |
 | `entry` | — (label = the chatter's name; deduped by `userId`) | chat `!entry` |
@@ -106,8 +110,10 @@ click. Follow the same rule from Stream Deck and chat macros.
 
 Status must never clobber the persisted update payload, so it rides the
 `Fortuna Command` relay as reserved command `__status` with the JSON in `value`
-(no third SB action). Sent after every command and periodically probed by the
-control page.
+(no third SB action). Sent after a state change, after a command that fails, and when
+the sidecar connects. An unknown command and an ignored `entry` (closed window or
+duplicate) send none. Send `status` to force a snapshot; the control page probes
+every 10 seconds.
 
 ```json
 { "type": "fortuna:status", "connected": true,

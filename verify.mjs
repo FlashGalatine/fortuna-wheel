@@ -508,10 +508,14 @@ async function testSidecar() {
   await since(atOldActionCleanup, (d) => isUpdate(d) && !d.entries.some((e) => e.label === 'Old action proof'));
 
   // setSettings batch.
+  const atSettings = mark();
   cmd('setSettings', JSON.stringify({ removeOnDraw: true, defaultChatTag: 'neutral' }));
   const sSet = await client.next((d) => isStatus(d) && parseStatus(d).settings.removeOnDraw).then(parseStatus);
   check('sidecar: setSettings batch', sSet.settings.removeOnDraw === true && sSet.settings.defaultChatTag === 'neutral',
     JSON.stringify(sSet.settings));
+  const uSet = await since(atSettings, isUpdate, 1000);
+  check('sidecar: setSettings reaches fortuna:update, which is what gets replayed',
+    uSet?.settings.removeOnDraw === true && uSet.settings.defaultChatTag === 'neutral', JSON.stringify(uSet?.settings ?? null));
 
   // The new default tag reaches a viewer's entry.
   const atTagged = mark();

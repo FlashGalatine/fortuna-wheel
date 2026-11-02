@@ -16,8 +16,9 @@ CSS variables or replace the whole presentation (Magic 8-ball, crystal ball…)
 - **No cloud, no accounts** — everything runs on your machine over
   Streamer.bot's WebSocket.
 - **Deterministic spins** — the sidecar picks the winner once; every OBS
-  source and the control page derive the identical animation and land on the
-  same slice at the same moment ([docs/PROTOCOL.md](docs/PROTOCOL.md)).
+  source derives the identical animation and lands on the same slice at the same
+  moment, and the control page shows the drawn entry as text after the reveal
+  ([docs/PROTOCOL.md](docs/PROTOCOL.md)).
 - **State survives restarts** — entries, settings, and the last draw persist
   in `config.json`; overlays repaint on reconnect via a sync-on-connect replay.
 
@@ -150,7 +151,7 @@ launches harmless.
 
 - `npm start` — mock Streamer.bot (HTTP :7474 + WS :8080) with a landing page;
   `/mock/fixture` broadcasts a sample wheel, POST `/mock/push` any payload.
-- `npm run verify` — 230 offline checks: spin math determinism, the real
+- `npm run verify` — 231 offline checks: spin math determinism, the real
   panel-core against the mock (subscribe case, sync replay, serialized queue),
   HTTP maps, the mock's copy of the action's mapping, a real sidecar E2E (entry CRUD,
   `!entry` dedupe/limits, spin lifecycle, channel point redeems, hostile chat JSON,
