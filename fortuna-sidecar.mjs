@@ -61,8 +61,9 @@ let activeSpin = null; // in-flight spin block (state:"spinning") + its timers
 let revealTimer = null;
 let windowTimer = null;
 let entriesReady = false; // viewer drawing closed with entries on the wheel — control page highlights Spin
-let lastError = ''; // the latest failure, kept until someone at the control page has acted (dispatch)
+let lastError = ''; // the latest failure, kept until an operator command comes in (dispatch)
 let lastErrorAt = null;
+let lastErrorThrew = false; // a thrown error may be the only record of it, so a refusal can't replace it
 
 let sbWs = null;
 let sbReconnectTimer = null;
@@ -208,7 +209,7 @@ function pushStatus() {
         ? Math.max(0, Math.round((Date.parse(em.openedAt) + em.windowSec * 1000 - Date.now()) / 1000))
         : null,
     },
-    ready: entriesReady,
+    ready: entriesReady && !activeSpin, // a drawing closed mid-spin is ready once the spin is over
     spinning: !!activeSpin,
     lastSpin: config.lastSpin ? { label: config.lastSpin.selectedEntry.label, tag: config.lastSpin.selectedEntry.tag } : null,
     settings: { ...config.settings },
@@ -222,17 +223,24 @@ function pushStatus() {
   doAction('Fortuna Command', { command: '__status', value: json, fortunaCommand: '__status', fortunaValue: json });
 }
 
-function applyChange() {
+// keepReveal: a viewer joining or a drawing closing itself isn't anyone moving on from the
+// result, so a reveal on show stays on show.
+function applyChange(keepReveal = false) {
   if (!config.entries.length) entriesReady = false; // nothing left to spin, however it emptied
+  if (keepReveal && config.lastSpin?.revealRevision === config.revision) config.lastSpin.revealRevision = config.revision + 1;
   config.revision++;
+  // Only a reveal on show paints its frozen slices. After that they'd just ride along in every update.
+  if (config.lastSpin?.segments && config.lastSpin.revealRevision !== config.revision) delete config.lastSpin.segments;
   persist();
   pushUpdate();
   pushStatus();
 }
 
-function noteError(msg) {
+function noteError(msg, threw = false) {
+  if (lastErrorThrew && !threw) return; // an operator command clears it first (dispatch)
   lastError = msg;
   lastErrorAt = new Date().toISOString();
+  lastErrorThrew = threw;
 }
 
 function fail(msg) {
@@ -276,7 +284,7 @@ function chatEntry(user, userId) {
   if (config.entries.filter((e) => e.source === 'chat').length >= config.entryMode.maxEntries) {
     closeEntryWindow('full');
   } else {
-    applyChange();
+    applyChange(true);
   }
 }
 
@@ -305,7 +313,7 @@ function closeEntryWindow(reason) {
   // entries collected) — the control page lights the Spin button.
   if (wasOpen && config.entries.length > 0) entriesReady = true;
   log(`entries CLOSED (${reason}) — ${config.entries.length} on the wheel${entriesReady ? ', READY' : ''}`);
-  applyChange();
+  applyChange(reason === 'time' || reason === 'full');
 }
 
 // ── Spin engine ───────────────────────────────────────────────────────────────
@@ -313,7 +321,7 @@ function closeEntryWindow(reason) {
 function spin(opts) {
   if (activeSpin) { fail('spin: already spinning'); return; }
   if (config.entries.length < 1) { fail('spin: the wheel is empty'); return; }
-  if (config.entryMode.open) closeEntryWindow('spin'); // no late entries mid-spin
+  if (config.entryMode.open) closeEntryWindow('spin'); // this wheel is set; one opened mid-spin feeds the next
 
   const n = config.entries.length;
   const selectedIndex = randomInt(n);
@@ -350,8 +358,8 @@ function spin(opts) {
 
 function reveal(removeAfter) {
   if (!activeSpin) return;
-  // The revision applyChange() below gives this reveal. A later one means something changed
-  // after it, and the overlay stops showing it.
+  // The revision applyChange() below gives this reveal. Once the wheel's revision passes it,
+  // the wheel has moved on and the overlay stops showing it.
   config.lastSpin = { ...activeSpin, state: 'revealed', revealRevision: config.revision + 1 };
   activeSpin = null;
   if (removeAfter) removeEntryById(config.lastSpin.selectedEntry.id);
@@ -367,16 +375,19 @@ function removeEntryById(id) {
 
 // ── Command dispatch (inbound half of the bus) ────────────────────────────────
 
-const OPERATOR_COMMANDS = ['addEntry', 'removeEntry', 'setTag', 'clearEntries', 'setEntries', 'openEntries', 'closeEntries', 'spin', 'removeDrawn', 'setSettings'];
+// Every other command an operator can send clears the error note, so a new one counts by default.
+const NOT_OPERATOR_COMMANDS = ['entry', 'status'];
 
 function dispatch(command, value, user, userId) {
   if (command === '__status') return; // our own status relay echoing back
   log(`command: ${command}${value ? ' ' + value.slice(0, 120) : ''}${user ? ` (from ${user})` : ''}`);
-  // The note is the only record on a hidden launch, so only someone who can see it clears
-  // it: the next operator command with no chat user behind it. If that command fails, it
-  // sets a new note. Chat, redeems and the page's own status probes can all run while
-  // nobody is looking (docs/PROTOCOL.md).
-  if (!user && OPERATOR_COMMANDS.includes(command)) { lastError = ''; lastErrorAt = null; }
+  // The note is the only record on a hidden launch, so chat can't clear it, only the next
+  // operator command with no user behind it. No user just means it didn't come from chat: a
+  // control page click, but also a timed action, which nobody may be watching. If the command
+  // fails, it sets a new note. Chat, redeems and the page's own status probes don't count
+  // (docs/PROTOCOL.md).
+  const noteBefore = [lastError, lastErrorAt, lastErrorThrew];
+  if (!user && !NOT_OPERATOR_COMMANDS.includes(command)) { lastError = ''; lastErrorAt = null; lastErrorThrew = false; }
   switch (command) {
     case 'addEntry': {
       // JSON {label, tag} from the control page, or plain chat text
@@ -453,6 +464,7 @@ function dispatch(command, value, user, userId) {
     }
     case 'status': pushStatus(); return;
     default:
+      [lastError, lastErrorAt, lastErrorThrew] = noteBefore; // an unknown command doesn't count
       log(`unknown command "${command}" — ignored`);
   }
 }
@@ -497,7 +509,7 @@ function connectSb() {
       try {
         dispatch(String(d.command ?? ''), String(d.value ?? ''), d.user == null ? '' : String(d.user), d.userId == null ? '' : String(d.userId));
       } catch (err) {
-        noteError(`a command failed: ${err?.message ?? err}`);
+        noteError(`a command failed: ${err?.message ?? err}`, true);
         log(`${lastError}\n${err?.stack ?? err}`);
         try { pushStatus(); } catch { /* the log line is the record */ }
       }

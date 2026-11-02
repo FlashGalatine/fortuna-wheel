@@ -586,11 +586,38 @@ async function testSidecar() {
   cmd('addEntry', 'Next round');
   const uNext = await since(atNext, (d) => isUpdate(d) && d.entries.some((e) => e.label === 'Next round'));
   check('sidecar: the next change ends a reveal', !!uNext && !M.revealOnShow(uNext, Date.now()) && liveAfterChange(uNext), JSON.stringify(uNext?.spin ?? null));
+  check('sidecar: the frozen slices go when the reveal ends', !!uNext && uNext.spin.segments === undefined, JSON.stringify(uNext?.spin ?? null));
   const rKept = await spinThrough('');
   const atDrawnGone = mark();
   cmd('removeDrawn');
   const uDrawnGone = await since(atDrawnGone, (d) => isUpdate(d) && !d.entries.some((e) => e.label === rKept.winner));
   check('sidecar: removeDrawn ends a reveal', !!uDrawnGone && !M.revealOnShow(uDrawnGone, Date.now()) && liveAfterChange(uDrawnGone), JSON.stringify(uDrawnGone?.spin ?? null));
+
+  // Nobody has moved on from the result when a viewer joins or a drawing closes itself, so
+  // the card stays. A drawing can only be open at the reveal if it opened during the spin.
+  const rStays = await spinThrough('', async () => {
+    const at = mark();
+    cmd('openEntries', '{"maxEntries":10,"windowSec":2}');
+    await since(at, (d) => isUpdate(d) && d.entryMode.open);
+  });
+  const stillOnWinner = (u) => !!u && M.revealOnShow(u, Date.now()) && landedOn(u) === rStays.winner;
+  const atLate = mark();
+  cmd('!entry', '', { commandId: 'trig-9', rawInput: '', user: 'late_viewer', userId: 'u910' });
+  const uLate = await since(atLate, (d) => isUpdate(d) && d.entries.some((e) => e.userId === 'u910'));
+  check('sidecar: a viewer\'s !entry after the reveal leaves the result on show', stillOnWinner(uLate), JSON.stringify(uLate?.spin ?? null));
+  const uTimedOut = await since(atLate, (d) => isUpdate(d) && !d.entryMode.open);
+  check('sidecar: a timed drawing closing leaves the result on show', stillOnWinner(uTimedOut), JSON.stringify(uTimedOut?.spin ?? null));
+  // setSettings sends no update, so it can't end one either.
+  const atSettings = mark();
+  cmd('setSettings', '{"defaultChatTag":"good"}');
+  await since(atSettings, isStatus);
+  await sleep(100);
+  check('sidecar: setSettings sends no update, so the result stays on show', !client.events.slice(atSettings).some(isUpdate));
+  // A mod's change is someone acting, so it ends one like any other.
+  const atModNext = mark();
+  cmd('!wheel', '', { commandId: 'trig-10', rawInput: 'addEntry Mod next', user: 'modfriend', userId: 'u5' });
+  const uModNext = await since(atModNext, (d) => isUpdate(d) && d.entries.some((e) => e.label === 'Mod next'));
+  check('sidecar: a mod\'s !wheel change ends a reveal', !!uModNext && !M.revealOnShow(uModNext, Date.now()) && liveAfterChange(uModNext), JSON.stringify(uModNext?.spin ?? null));
 
   // ── Drawing ready ──
   // It means there's a drawing to spin, so it can't outlast the last entry.
@@ -629,6 +656,19 @@ async function testSidecar() {
   };
   const NOTE = 'removeEntry: no entry "no_such_note"';
   const raiseNote = () => statusAfter(() => cmd('removeEntry', 'no_such_note'));
+
+  // A drawing closed during a spin is ready for the next one, once this one is over.
+  let sDuring = null;
+  await spinThrough('', async () => {
+    const at = mark();
+    cmd('openEntries', '{"maxEntries":10,"windowSec":0}');
+    await since(at, (d) => isUpdate(d) && d.entryMode.open);
+    sDuring = await statusAfter(() => cmd('closeEntries'));
+  });
+  const sAfterSpin = await statusAfter(() => {});
+  check('sidecar: a drawing closed during a spin waits for the reveal to show Drawing ready',
+    sDuring?.spinning === true && sDuring.ready === false && sAfterSpin.spinning === false && sAfterSpin.ready === true, JSON.stringify({ sDuring, sAfterSpin }));
+
   const atChatOpen = mark();
   cmd('!wheel', '', { commandId: 'trig-6', rawInput: 'openEntries {"maxEntries":50,"windowSec":0}', user: 'modfriend', userId: 'u5' });
   await since(atChatOpen, (d) => isUpdate(d) && d.entryMode.open);
@@ -778,6 +818,15 @@ async function testSidecar() {
   const relayStack = loggedStack();
   check('sidecar: a dropped relay shows its error and logs its stack',
     !!relayStack && relayNote === `a command failed: ${relayStack[1]}`, `${relayNote} | ${sidecarOut.slice(-300)}`);
+
+  // A thrown error may be the only record of it, so a refusal from chat can't replace it,
+  // but an operator's next command still moves the note on.
+  const sThrown = await statusAfter(relay({ command: 'clearEntries', value: 'all', user: { toString: 1 } }));
+  const sChatRefused = await statusAfter(() => cmd('!wheel', '', { commandId: 'trig-11', rawInput: 'removeEntry no_such_note', user: 'modfriend', userId: 'u5' }));
+  check('sidecar: a refusal from chat doesn\'t replace a thrown error',
+    /^a command failed: \S/.test(sThrown.lastError) && sChatRefused.lastError === sThrown.lastError && sChatRefused.lastErrorAt === sThrown.lastErrorAt, JSON.stringify({ sThrown, sChatRefused }));
+  const sOperatorRefused = await statusAfter(() => cmd('removeEntry', 'no_such_note'));
+  check('sidecar: an operator\'s next command replaces a thrown error', sOperatorRefused.lastError === NOTE, JSON.stringify(sOperatorRefused));
 
   // A bad option keeps its old value and the window still opens. These updates come from
   // the live state, so they also prove the rows above left the entries alone. The options

@@ -61,12 +61,14 @@ wheel-specific** — a Magic 8-ball theme is a valid consumer (docs/THEMING.md).
   the slices paints `segments`, not `entries`, until the reveal is over:** the
   rotation only lands on the winner on that list. `paintedEntries()` in
   overlay/spin-math.js makes the choice.
-- A reveal is over once anything changes after it. The revealed block carries
+- A reveal is over once something changes after it. The revealed block carries
   `revealRevision`, the update `revision` it was revealed at, so a higher `revision`
   means the wheel has moved on: the overlay hides the result card and paints
-  `entries` again (`revealOnShow()` in overlay/spin-math.js). `setSettings` sends no
-  update, so it doesn't end a reveal. The card also stops replaying on a reconnect 5
-  minutes after the spin. A block without these fields, from an older sidecar, paints
+  `entries` again (`revealOnShow()` in overlay/spin-math.js), and the sidecar drops
+  `segments` from the block. A viewer's `!entry` and a drawing closing itself don't
+  count, because nobody has moved on from the result: those updates carry
+  `revealRevision` forward. `setSettings` sends no update, so it doesn't end a reveal
+  either. The card also stops replaying on a reconnect 5 minutes after the spin. A block without these fields, from an older sidecar, paints
   `entries`.
 
 ### Spin determinism
@@ -142,16 +144,19 @@ control page.
 `ready:true` = a viewer drawing closed with entries on the wheel: it filled up
 (max reached), timed out, or was closed by hand. The control page pulses the Spin
 button. It clears when a spin starts, a drawing opens, `clearEntries` runs, or the
-wheel empties any other way.
+wheel empties any other way. It stays off during a spin, so a drawing closed mid-spin
+shows as ready after the reveal.
 
 `lastError` is the latest failure: a refused command, or one that threw. A launch
-with no window has no log to read, so this note can be the only record, and it stays
-until someone who can see it has acted.
+with no window has no log to read, so this note can be the only record. A later
+refusal can replace a refusal's note, but not a thrown error's.
 
 - **What clears it:** the next `addEntry`, `removeEntry`, `setTag`, `clearEntries`,
   `setEntries`, `openEntries`, `closeEntries`, `spin`, `removeDrawn` or `setSettings`
-  with no `user`, such as a control page click or a Stream Deck action. If that
-  command fails too, its own failure becomes the note. A sidecar restart also clears
+  with no `user`. That only means it didn't come from chat: a control page click, but
+  also a timed action nobody may be watching. A Stream Deck action counts if it sets no
+  `user`, which hasn't been checked. If that command fails too, its own failure becomes
+  the note. A sidecar restart also clears
   it, because it isn't saved.
 - **What doesn't:** chat commands, `!entry` and redeems, which can land while nobody
   is looking; the page's own `status` probes, which run every 10 seconds regardless;

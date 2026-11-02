@@ -192,10 +192,17 @@
   // ── State intake ────────────────────────────────────────────────────────────
 
   function apply(payload) {
+    // Pushes can arrive out of order, so an older update never replaces a newer one. This
+    // goes by time first, because a reset or restored config starts its revisions over.
+    const newerBy = state ? Date.parse(state.generatedAt) - Date.parse(payload.generatedAt) : 0;
+    if (state && (newerBy > 0 || (newerBy === 0 && payload.revision < state.revision))) return;
+
     state = payload;
     const spin = payload.spin;
     const now = Date.now();
-    painted = M.paintedEntries(payload, now);
+    // spin-math.js can be older than this file (cached, or vendored by a theme). With no
+    // helpers, this falls back on the live list and the spin's own state.
+    painted = M.paintedEntries ? M.paintedEntries(payload, now) : payload.entries;
 
     // Entries-open banner.
     if (payload.entryMode && payload.entryMode.open) {
@@ -206,7 +213,7 @@
       bannerEl.hidden = true;
     }
 
-    if (M.revealOnShow(payload, now)) showReveal(spin);
+    if (M.revealOnShow ? M.revealOnShow(payload, now) : spin && spin.state === 'revealed') showReveal(spin);
     else hideReveal();
 
     animate();

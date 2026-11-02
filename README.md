@@ -108,7 +108,7 @@ action, as described below.
 **Set a cooldown of at least 10 seconds on a spin reward** (in its Twitch
 settings). A spin takes up to about 8 seconds, and a redeem is refused while the
 wheel is spinning or empty, but the viewer still loses the points. A redeem also
-closes an open viewer drawing, because nobody can join mid-spin.
+closes an open viewer drawing when the spin starts.
 
 **A reward that should do something else, or a Stream Deck button,** gets its own
 action: *Set Argument* `command` (and `value` if needed), then *Run Action*
@@ -144,7 +144,8 @@ launches harmless.
    wheel” appears under the last draw; or tick *remove the drawn entry
    afterwards* / the always-on setting for elimination-style wheels. The wheel
    stays on the winner until the next change to it, which clears the card and shows
-   the current list. Changes made during a spin go on the next wheel.
+   the current list. A viewer's `!entry` or a drawing closing itself doesn't count.
+   Changes made during a spin go on the next wheel.
 3. **Viewer drawings**: set max entries and/or a time window, click *Open
    entries*, and chat joins with `!entry`. When it fills up or times out the
    Spin button pulses — the spin itself stays in your hands.
@@ -153,7 +154,7 @@ launches harmless.
 
 - `npm start` — mock Streamer.bot (HTTP :7474 + WS :8080) with a landing page;
   `/mock/fixture` broadcasts a sample wheel, POST `/mock/push` any payload.
-- `npm run verify` — 214 offline checks: spin math determinism, the real
+- `npm run verify` — 222 offline checks: spin math determinism, the real
   panel-core against the mock (subscribe case, sync replay, serialized queue),
   HTTP maps, the mock's copy of the action's mapping, a real sidecar E2E (entry CRUD,
   `!entry` dedupe/limits, spin lifecycle, list changes during a spin, channel point

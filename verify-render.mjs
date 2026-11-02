@@ -284,11 +284,24 @@ try {
     await control.waitForSelector('#status .err', { timeout: 5000 });
     const shown = (await note()).join('');
     check('control: a failure shows a note and when it happened', shown.includes('no such entry') && /\(at .+\)/.test(shown), shown);
+    check('control: the note\'s time includes the date', shown.includes(String(new Date().getFullYear())), shown);
     await control.fill('#new-label', 'Back to work');
     await control.click('#btn-add');
     await control.waitForFunction(() => !document.querySelector('#status .err'), null, { timeout: 5000 }).catch(() => {});
     check('control: a click that works clears the note', (await note()).length === 0, JSON.stringify(await note()));
     await control.close();
+
+    // Hand-delivered updates, for the two cases the sidecar can't produce on demand.
+    const deliver = (labelText, generatedAt) => page.evaluate(([label, at]) => {
+      window.dispatchEvent(new CustomEvent('fortuna:update', { detail: { type: 'fortuna:update', revision: 1, generatedAt: at, entries: [{ label, tag: 'good' }], entryMode: { open: false }, spin: null } }));
+      return window.__frame.labels;
+    }, [labelText, generatedAt]);
+    const afterStale = await deliver('Stale', '2000-01-01T00:00:00.000Z');
+    check('wheel: an older update doesn\'t replace a newer one', !afterStale.includes('Stale'), JSON.stringify(afterStale));
+    // A new wheel.js beside an old spin-math.js, cached or vendored by a theme, still paints.
+    await page.evaluate(() => { delete window.FortunaSpinMath.paintedEntries; delete window.FortunaSpinMath.revealOnShow; });
+    const afterOldMath = await deliver('Old math', new Date().toISOString());
+    check('wheel: an old spin-math.js still paints the live list', afterOldMath.includes('Old math'), JSON.stringify(afterOldMath));
     await page.close();
   }
 } catch (err) {

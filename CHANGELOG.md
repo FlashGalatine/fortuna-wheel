@@ -10,16 +10,21 @@ traceability.
 
 ## [Unreleased]
 
-**To upgrade,** follow "Updating an existing install" in the README. The action didn't
-change, so there's nothing to paste, but refresh the wheel's browser source as well: the
-wheel fix is partly in the overlay.
+**To upgrade,** follow "Updating an existing install" in the README. The action's code
+didn't change since 1.0.12, so from 1.0.12 there's nothing to paste; from an older version,
+paste it as the steps say. Either way, refresh the wheel's browser source as well: the wheel
+fix is partly in the overlay.
 
 ### Changed
 
 - **The result card goes at the next change to the wheel.** It used to stay for up
-  to 5 minutes, naming a winner the pointer had moved off. A spin's update carries
-  `segments` and `revealRevision` for this (docs/PROTOCOL.md). A theme that draws its
-  own slices should paint `segments` during a spin (docs/THEMING.md).
+  to 5 minutes, naming a winner the pointer had moved off. A viewer's `!entry` or a
+  drawing closing itself doesn't count, so chat can't wipe the result. A spin's update
+  carries `segments` and `revealRevision` for this (docs/PROTOCOL.md), until the reveal
+  is over. A theme that draws its own slices should paint `segments` during a spin
+  (docs/THEMING.md).
+- **The overlay ignores an update older than the one on screen.** Updates can arrive
+  out of order, which could bring back a result the wheel had moved past.
 - **The control page's error note says when it happened.** Status has a new
   `lastErrorAt`.
 
@@ -35,12 +40,14 @@ wheel fix is partly in the overlay.
   drawing opened during a spin takes `!entry` straight away.
 - **"Drawing ready" could outlast the wheel.** `setEntries []` or removing the last
   entry left the banner and pulse over a disabled Spin button. An empty wheel now clears
-  it, however it emptied.
+  it, however it emptied. A drawing closed during a spin now waits for the reveal to
+  show it, instead of pulsing a Spin button that's disabled.
 - **An error note stayed until the next spin, however many commands worked after it.**
-  It now clears on the next command from the control page or a Stream Deck action that
-  works, including a spin. Chat commands, redeems and the page's status probes no longer
-  clear it, not even a spin from chat, so a failure stays visible on a launch with no
-  log to read (docs/PROTOCOL.md).
+  It now clears on the next command that works with no chat user behind it, such as a
+  control page click, including a spin. Chat commands, redeems and the page's status
+  probes no longer clear it, not even a spin from chat, and a refusal from chat can't
+  replace a thrown error, which may be the only record on a launch with no log to read
+  (docs/PROTOCOL.md).
 
 ### Documentation
 
@@ -48,11 +55,11 @@ wheel fix is partly in the overlay.
   who stopped there kept the old action. They now say Save and Compile, including in
   the 1.0.12 notes below.
 
-Verified offline: `verify` 214/214, `verify:render` 26/26.
+Verified offline: `verify` 222/222, `verify:render` 29/29.
 
 Not yet verified live: all three fixes. They ran in a browser against the real sidecar
-and the mock. The error note relies on control page commands arriving with no `user`,
-which Streamer.bot's docs imply for a DoAction but which hasn't been seen on a live one.
+and the mock. The error note relies on commands arriving with no `user`. A control page
+spin did on real Streamer.bot 1.0.7, but a Stream Deck action hasn't been checked.
 
 ## [1.0.12] — 2026-11-01
 
