@@ -5,16 +5,59 @@ All notable changes to **Fortuna** are recorded here. The format follows
 tracks the repository's commit count at release time.
 
 Nothing was tagged between the initial release and 1.0.6, so that release
-collects every change in between. Commit hashes and landing dates are noted for
+collects every change in between. Commit hashes and landing dates are noted there for
 traceability.
 
 ## [Unreleased]
 
+**To upgrade,** follow "Updating an existing install" in the README. The action didn't
+change, so there's nothing to paste, but refresh the wheel's browser source as well: the
+wheel fix is partly in the overlay.
+
+### Changed
+
+- **The result card goes at the next change to the wheel.** It used to stay for up
+  to 5 minutes, naming a winner the pointer had moved off. A spin's update carries
+  `segments` and `revealRevision` for this (docs/PROTOCOL.md). A theme that draws its
+  own slices should paint `segments` during a spin (docs/THEMING.md).
+- **The control page's error note says when it happened.** Status has a new
+  `lastErrorAt`.
+
+### Fixed
+
+- **The wheel could stop on a slice other than the winner.** This closes the known
+  issue in 1.0.12. The overlay laid out slices from the live list but worked out the
+  rotation for the list at spin time, so any edit during a spin could leave the pointer
+  on a different entry from the one the card named. `removeOnDraw`, `removeAfter` and
+  `removeDrawn` did the same when they took the winner off with the card up. A spin now
+  carries the slices it froze, and the overlay paints those until the reveal is over. No
+  command is refused to do this: an edit during a spin goes on the next wheel, and a
+  drawing opened during a spin takes `!entry` straight away.
+- **"Drawing ready" could outlast the wheel.** `setEntries []` or removing the last
+  entry left the banner and pulse over a disabled Spin button. An empty wheel now clears
+  it, however it emptied.
+- **An error note stayed until the next spin, however many commands worked after it.**
+  It now clears on the next command from the control page or a Stream Deck action that
+  works, including a spin. Chat commands, redeems and the page's status probes no longer
+  clear it, not even a spin from chat, so a failure stays visible on a launch with no
+  log to read (docs/PROTOCOL.md).
+
+Verified offline: `verify` 214/214, `verify:render` 26/26.
+
+Not yet verified live: all three fixes. They ran in a browser against the real sidecar
+and the mock. The error note relies on control page commands arriving with no `user`,
+which Streamer.bot's docs imply for a DoAction but which hasn't been seen on a live one.
+
+## [1.0.12] — 2026-11-01
+
 **To upgrade,** follow "Updating an existing install" in the README: get the new
 files, stop the sidecar, paste the new `fortuna-command.cs` into the action, click
-Compile, then start the sidecar, reload the control page and any OBS docks, and
-refresh the wheel's browser source. The self-spin fix needs all of them current. On the old action, a directly attached
-reward does nothing or runs the viewer's text as a command.
+Compile, then start the sidecar and reload the control page and any OBS docks. The
+self-spin fix needs all of them current. On the old action, a directly attached
+reward does nothing or runs the viewer's text as a command. Updating doesn't remove a
+Set Argument for `command` or `value` you added inside `Fortuna Command`, which the
+old header suggested for Stream Deck. Delete it and use a separate action: a fixed
+`command` of `spin` still spins the wheel on any viewer's `!entry`.
 
 ### Added
 
@@ -25,18 +68,12 @@ reward does nothing or runs the viewer's text as a command.
 - **`verify` runs the real C# action.** It compiles `fortuna-command.cs` with the
   .NET Framework's `csc` against a stub `CPH` (`tools/action-harness.cs`) and
   reports those checks as skipped when `csc` is missing. The same rows also run
-  through the mock's copy of the mapping, so drift on any row fails — 214/214. This
+  through the mock's copy of the mapping, so drift on any row fails — 167/167. This
   proves the action's logic, not real Streamer.bot behavior.
 
 ### Changed
 
 - **Chat commands other than `!wheel` drop the text typed after them.**
-- **The result card goes at the next change to the wheel.** It used to stay for up
-  to 5 minutes, naming a winner the pointer had moved off. A spin's update carries
-  `segments` and `revealRevision` for this (docs/PROTOCOL.md). A theme that draws its
-  own slices should paint `segments` during a spin (docs/THEMING.md).
-- **The control page's error note says when it happened.** Status has a new
-  `lastErrorAt`.
 
 ### Removed
 
@@ -91,38 +128,46 @@ reward does nothing or runs the viewer's text as a command.
   timer, a spin's reveal or a timed entry window's close: a throw there still stops the
   sidecar, though no known input causes one. Viewers can still run any valid command on
   an unrestricted `!wheel`, so keep it restricted to moderators.
-- **The wheel could stop on a slice other than the winner.** The overlay laid out
-  slices from the live list but worked out the rotation for the list at spin time, so
-  any edit during a spin could leave the pointer on a different entry from the one the
-  card named. removeOnDraw and `removeAfter` did the same at the reveal, with no edit at
-  all. A spin now carries the slices it froze, and the overlay paints those until the
-  reveal is over. No command is refused to do this: an edit during a spin goes on the
-  next wheel, and a drawing opened during a spin takes `!entry` straight away.
-- **"Drawing ready" could outlast the wheel.** `setEntries []` or removing the last
-  entry left the banner and pulse over a disabled Spin button. An empty wheel now clears
-  it, however it emptied.
-- **An error note stayed until the next spin, however many commands worked after it.**
-  It now clears on the next command from the control page or a Stream Deck action that
-  works, including a spin. Chat commands, redeems and the page's status probes no longer
-  clear it, not even a spin from chat, so a failure stays visible on a launch with no
-  log to read (docs/PROTOCOL.md).
 
 ### Documentation
 
-- README: channel point setup, and the `verify` check count brought up to date.
+- README: channel point setup, the `verify` check count brought up to date, and an
+  update step for removing a Set Argument from inside `Fortuna Command`.
 
-Verified offline: `verify` 214/214, `verify:render` 26/26. Verified live on Streamer.bot 1.0.7, on pastes
-of the action from before the Command Cooldown check: it compiles; simulated redeem,
-chat and control page shapes behave as designed over DoAction; a real chat trigger
-relays correctly and its `__source` reads as the event type's name; and a real Set
-Argument `command` = `spin` left the wheel idle with no loop. Not yet verified live:
-the Command Cooldown check, a real channel point redeem, approval or rejection, the
-`__source` values they carry, the sidecar crash fix, and the wheel, "Drawing ready" and
-error note fixes. The `__` refusal was checked in the compiled action against a stub
-`CPH` and in the mock, and the escaping in a browser against the mock. Neither was
-checked on Streamer.bot. The wheel and note fixes ran in a browser against the real
-sidecar and the mock. The note relies on control page commands arriving with no `user`,
-which Streamer.bot's docs imply for a DoAction but which hasn't been seen on a live one.
+### Known issues
+
+- **The pointer can end up on a slice other than the winner the card names.** This
+  can happen if the list changes during a spin or while the card is showing. It
+  happens every time `removeOnDraw`, `removeAfter` or `removeDrawn` takes the winner
+  off while the card is showing and other entries remain. The card's winner is the
+  real result. This predates this release, and a fix is in progress.
+
+Verified offline: `verify` 167/167, `verify:render` 15/15.
+
+Verified live on Streamer.bot 1.0.7 and a Twitch Affiliate channel, with the action
+and sidecar at `bf7b5de`:
+
+- A real redeem spins once, and so does a redeem with Skip Queue turned on. Approving
+  or rejecting a redeem is ignored, and the log shows `__source` as
+  `TwitchRewardRedemptionUpdated` with `fulfilled` or `canceled`.
+- A command on cooldown is ignored. This ran from a second account, because
+  Streamer.bot's docs say the broadcaster account is always exempt from cooldowns.
+- `!wheel __status {}` from chat is refused.
+- The `addEntry` crash message from chat leaves the sidecar running with no entry
+  added.
+- `!entry` joins an open drawing.
+
+Verified live on earlier pastes of the action: it compiles; simulated redeem, chat
+and control page shapes behave as designed over DoAction; a real chat trigger's
+`__source` reads as the event type's name; and a real Set Argument `command` = `spin`
+left the wheel idle with no loop.
+
+Not yet verified live: a redeem during a broadcast, from a viewer's account or with
+typed text; the other crash paths (`setEntries`, `setTag`, `openEntries`); and Kick.
+The control page escaping was checked in a browser against the mock, not on
+Streamer.bot. No chat message carrying a real U+FEFF before `__status` reached
+Streamer.bot, so it only ran through DoAction in the chat trigger's shape, where it
+stayed an unknown command.
 
 ## [1.0.6] — 2026-07-29
 
@@ -166,5 +211,6 @@ Initial release — Wheel of Fate randomizer overlay for Streamer.bot.
 
 Verified offline: `verify` 49/49, `verify:render` 11/11.
 
-[Unreleased]: https://github.com/FlashGalatine/fortuna-wheel/compare/bd40cf7...main
+[Unreleased]: https://github.com/FlashGalatine/fortuna-wheel/compare/c0ff3a2...main
+[1.0.12]: https://github.com/FlashGalatine/fortuna-wheel/compare/bd40cf7...c0ff3a2
 [1.0.6]: https://github.com/FlashGalatine/fortuna-wheel/compare/7b030f7...bd40cf7
