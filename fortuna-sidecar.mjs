@@ -47,6 +47,10 @@ const GUARD_PORT = Number(process.env.FORTUNA_GUARD_PORT) || 7493;
 const MAX_ENTRIES = 200;
 const LABEL_MAX_CHARS = 80;
 const TAGS = ['good', 'bad', 'neutral'];
+// What newId('e') makes. A saved id has to look like this to be kept: findEntry trims its
+// key, so a blank or padded id could never match, and it tries ids first, so an id like
+// "Alpha" would catch removal by another entry's label.
+const ENTRY_ID = /^e_[\w-]{1,40}$/;
 const REVEAL_GRACE_MS = 300; // reveal broadcast lands after every client's animation finished
 
 let config = {
@@ -92,10 +96,10 @@ async function loadConfig() {
 function adoptConfig(parsed) {
   if (!parsed || typeof parsed !== 'object') return;
   config = {
-    entries: (Array.isArray(parsed.entries) ? parsed.entries : [])
+    entries: uniqueIds((Array.isArray(parsed.entries) ? parsed.entries : [])
       .map(normalizeEntry)
       .filter(Boolean)
-      .slice(0, MAX_ENTRIES),
+      .slice(0, MAX_ENTRIES)),
     entryMode: {
       // The entry window never survives a restart open — its timer died with the
       // old process, and silently collecting entries forever would be worse.
@@ -105,7 +109,7 @@ function adoptConfig(parsed) {
       openedAt: null,
     },
     settings: {
-      removeOnDraw: !!parsed.settings?.removeOnDraw,
+      removeOnDraw: parsed.settings?.removeOnDraw === true || parsed.settings?.removeOnDraw === 'true',
       defaultChatTag: TAGS.includes(parsed.settings?.defaultChatTag) ? parsed.settings.defaultChatTag : 'good',
     },
     lastSpin: normalizeSpin(parsed.lastSpin),
@@ -118,7 +122,7 @@ function normalizeEntry(e) {
   const label = (textOf(e.label) ?? '').trim().slice(0, LABEL_MAX_CHARS);
   if (!label) return null;
   const out = {
-    id: typeof e.id === 'string' && e.id ? e.id : newId('e'),
+    id: typeof e.id === 'string' && ENTRY_ID.test(e.id) ? e.id : newId('e'),
     label,
     tag: TAGS.includes(e.tag) ? e.tag : 'neutral',
     source: e.source === 'chat' ? 'chat' : 'streamer',
@@ -130,11 +134,33 @@ function normalizeEntry(e) {
   return out;
 }
 
+// Removal goes by id, so a list needs each id once: the first holder keeps it. A list of
+// generated ids needs this too. Rows normalized in the same millisecond differ only by
+// newId's random part, which a 200-row list repeats about 1 time in 85.
+function uniqueIds(entries) {
+  const seen = new Set();
+  for (const e of entries) {
+    while (seen.has(e.id)) e.id = newId('e');
+    seen.add(e.id);
+  }
+  return entries;
+}
+
 // Only a completed spin is worth restoring; a half-finished one is meaningless
-// after a restart (its reveal timer is gone).
+// after a restart (its reveal timer is gone). It gets replayed to every overlay, whose
+// arithmetic on these fields throws on an object, so one bad field drops the whole block,
+// and only the known fields go back out.
 function normalizeSpin(s) {
-  if (!s || typeof s !== 'object' || s.state !== 'revealed' || !s.selectedEntry) return null;
-  return s;
+  if (!s || typeof s !== 'object' || s.state !== 'revealed') return null;
+  const selectedEntry = normalizeEntry(s.selectedEntry);
+  const { spinId, entryCount, selectedIndex, seed, startedAt, durationMs, extraSpins } = s;
+  const usable = selectedEntry && spinId && typeof spinId === 'string'
+    && Number.isInteger(entryCount) && entryCount >= 1 && entryCount <= MAX_ENTRIES
+    && Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < entryCount
+    && Number.isFinite(seed) && Number.isFinite(extraSpins)
+    && Number.isFinite(durationMs) && durationMs > 0
+    && typeof startedAt === 'string' && !Number.isNaN(Date.parse(startedAt));
+  return usable ? { spinId, entryCount, selectedIndex, selectedEntry, seed, startedAt, durationMs, extraSpins, state: 'revealed' } : null;
 }
 
 async function persist() {
@@ -233,6 +259,26 @@ function fail(msg) {
   pushStatus();
 }
 
+// The backstop: a throw is logged and dropped, though it may leave its work half applied.
+// The note carries the error because a hidden launch has no log to read.
+function noteThrow(what, err) {
+  lastError = `${what} failed: ${err?.message ?? err}`;
+  log(lastError, `\n${err?.stack ?? err}`);
+  try { pushStatus(); } catch { /* the log line is the record */ }
+}
+
+// setTimeout for the part of a command that runs later, where the try/catch around
+// dispatch can't see it and a throw would end the process. A throw here got part way,
+// so the surfaces still hear the state it reached.
+function later(what, ms, fn) {
+  return setTimeout(() => {
+    try { fn(); } catch (err) {
+      try { config.revision++; persist(); pushUpdate(); } catch { /* noteThrow still reports it */ }
+      noteThrow(what, err);
+    }
+  }, ms);
+}
+
 // ── Entry management ──────────────────────────────────────────────────────────
 
 function addEntry({ label, tag, source, user, userId }) {
@@ -264,7 +310,7 @@ function chatEntry(user, userId) {
   if (chatCount >= config.entryMode.maxEntries) { closeEntryWindow('full'); return; }
   const entry = addEntry({ label: name, tag: config.settings.defaultChatTag, source: 'chat', user: name, userId });
   if (!entry) return;
-  log(`chat entry: ${name} (${config.entries.filter((e) => e.source === 'chat').length}/${config.entryMode.maxEntries})`);
+  log(`chat entry: ${entry.label} (${config.entries.filter((e) => e.source === 'chat').length}/${config.entryMode.maxEntries})`);
   if (config.entries.filter((e) => e.source === 'chat').length >= config.entryMode.maxEntries) {
     closeEntryWindow('full');
   } else {
@@ -282,7 +328,7 @@ function openEntryWindow(opts) {
   entriesReady = false;
   if (windowTimer) { clearTimeout(windowTimer); windowTimer = null; }
   if (config.entryMode.windowSec > 0) {
-    windowTimer = setTimeout(() => { windowTimer = null; closeEntryWindow('time'); }, config.entryMode.windowSec * 1000);
+    windowTimer = later("an entry window's close", config.entryMode.windowSec * 1000, () => { windowTimer = null; closeEntryWindow('time'); });
   }
   log(`entries OPEN (max ${config.entryMode.maxEntries}${config.entryMode.windowSec ? `, ${config.entryMode.windowSec}s window` : ''})`);
   applyChange();
@@ -327,21 +373,22 @@ function spin(opts) {
     extraSpins: 4 + (seed % 4),
     state: 'spinning',
   };
+  // Armed before anything that can throw. Only reveal() clears activeSpin, and a spin
+  // that never reveals would refuse every later spin.
+  revealTimer = later("a spin's reveal", activeSpin.durationMs + REVEAL_GRACE_MS, () => {
+    revealTimer = null;
+    reveal(removeAfter);
+  });
   entriesReady = false;
   lastError = '';
   log(`SPIN → [${selectedIndex}] "${activeSpin.selectedEntry.label}" (${activeSpin.selectedEntry.tag}), ${activeSpin.durationMs}ms, ${activeSpin.extraSpins} turns${removeAfter ? ', remove after' : ''}`);
   applyChange();
-
-  revealTimer = setTimeout(() => {
-    revealTimer = null;
-    reveal(removeAfter);
-  }, activeSpin.durationMs + REVEAL_GRACE_MS);
 }
 
 function reveal(removeAfter) {
   if (!activeSpin) return;
   config.lastSpin = { ...activeSpin, state: 'revealed' };
-  activeSpin = null;
+  activeSpin = null; // before anything that can throw, so the next spin isn't refused
   if (removeAfter) removeEntryById(config.lastSpin.selectedEntry.id);
   log(`REVEALED "${config.lastSpin.selectedEntry.label}"${removeAfter ? ' (removed from wheel)' : ''}`);
   applyChange();
@@ -357,7 +404,7 @@ function removeEntryById(id) {
 
 function dispatch(command, value, user, userId) {
   if (command === '__status') return; // our own status relay echoing back
-  log(`command: ${command}${value ? ' ' + value.slice(0, 120) : ''}${user ? ` (from ${user})` : ''}`);
+  log(`command: ${command.slice(0, 120)}${value ? ' ' + value.slice(0, 120) : ''}${user ? ` (from ${user.slice(0, 60)})` : ''}`);
   switch (command) {
     case 'addEntry': {
       // JSON {label, tag} from the control page, or plain chat text
@@ -405,7 +452,7 @@ function dispatch(command, value, user, userId) {
     case 'setEntries': {
       const arr = parseJson(value);
       if (!Array.isArray(arr)) { fail('setEntries: expected a JSON array'); return; }
-      const entries = arr.map(normalizeEntry).filter(Boolean).slice(0, MAX_ENTRIES);
+      const entries = uniqueIds(arr.map(normalizeEntry).filter(Boolean).slice(0, MAX_ENTRIES));
       // [] clears the wheel on purpose. A list with nothing usable in it must not.
       if (arr.length && !entries.length) { fail('setEntries: no usable entries'); return; }
       config.entries = entries;
@@ -434,7 +481,7 @@ function dispatch(command, value, user, userId) {
     }
     case 'status': pushStatus(); return;
     default:
-      log(`unknown command "${command}" — ignored`);
+      log(`unknown command "${command.slice(0, 120)}" — ignored`);
   }
 }
 
@@ -467,20 +514,14 @@ function connectSb() {
       // Echo-loop guard: this client also hears its own fortuna:update /
       // fortuna:status broadcasts. Consume ONLY the command channel.
       if (!d || typeof d !== 'object' || d.type !== 'fortuna:command') return;
-      // The backstop: a throw while handling a command is logged and dropped, though it may
-      // leave that command half applied. The timers a command arms (a spin's reveal, an entry
-      // window's close) run outside it, so a throw there still ends the process, though no
-      // known input causes one. The note carries the error because a hidden launch has no
-      // log to read. The String() calls belong inside it. The action only relays strings, so
-      // a field that throws here marks a bad relay, and running it with that field blank could
-      // do harm: clearEntries reads a blank value as "all". A field that doesn't throw, like
-      // {} or [], still converts and runs, as it always has.
+      // The String() calls belong inside the try. The action only relays strings, so a field
+      // that throws here marks a bad relay, and running it with that field blank could do
+      // harm: clearEntries reads a blank value as "all". A field that doesn't throw, like {}
+      // or [], still converts and runs, as it always has.
       try {
         dispatch(String(d.command ?? ''), String(d.value ?? ''), d.user == null ? '' : String(d.user), d.userId == null ? '' : String(d.userId));
       } catch (err) {
-        lastError = `a command failed: ${err?.message ?? err}`;
-        log(`${lastError}\n${err?.stack ?? err}`);
-        try { pushStatus(); } catch { /* the log line is the record */ }
+        noteThrow('a command', err);
       }
     });
   } catch {
@@ -503,14 +544,25 @@ function doAction(name, args) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-function log(msg) {
-  console.log(`[${new Date().toISOString()}] [fortuna] ${msg}`);
+// One call is one physical line. Viewer text can hold newlines and terminal escapes (JSON
+// "\n" and "\u001b" decode into a label), and a forged line would look genuine, so control
+// characters print escaped. Only `detail` goes out raw: a stack, with no viewer text in it.
+function log(msg, detail = '') {
+  const line = String(msg).replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  console.log(`[${new Date().toISOString()}] [fortuna] ${line}${detail}`);
 }
+
+// A closed stdout (the reader of a "| tee" exited, or a launcher left node running) fails
+// the write on a later tick, past any try/catch, and an unhandled 'error' would end the
+// process. The wheel matters more than the log.
+process.stdout.on('error', () => {});
 
 function acquireGuard() {
   return new Promise((res) => {
-    const guard = createServer();
-    guard.once('error', (err) => {
+    // Nothing talks to this port, it only has to stay bound. So hang up on whatever connects
+    // and ignore how that goes: an unhandled reset on the socket would end the process.
+    const guard = createServer((socket) => socket.on('error', () => {}).destroy());
+    guard.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
         log(`Another Fortuna sidecar is already running (guard port :${GUARD_PORT}) — exiting.`);
         process.exit(0);

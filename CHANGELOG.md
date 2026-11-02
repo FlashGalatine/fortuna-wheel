@@ -10,11 +10,42 @@ traceability.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A throw in a timer could stop the sidecar.** 1.0.12 logged and dropped a throw while a
+  command was being handled, but not one in the part that runs later on a timer: a spin's
+  reveal or a timed entry window's close. Those are now logged and dropped too, with the
+  error on the control page, though it may leave that work half applied. A spin that hits
+  one still reveals, and the next spin isn't refused. No known input causes one.
+- **A stray connection could stop the sidecar.** Any program on the PC that connected
+  to the single-instance guard port (7493) and reset the connection ended the process,
+  and the wheel stayed down until restarted. The port now hangs up on whatever connects.
+- **A closed log pipe could stop the sidecar.** Started with something like
+  `npm run sidecar | tee fortuna.log`, the process ended once the reader had exited and
+  it next logged. It now keeps running without its log.
+- **Removing a drawn entry could remove a different one.** Rows sharing an id, from
+  `setEntries` or a hand-edited `config.json`, all answered to the first of them, so
+  drawing the second removed the first. A blank or padded id couldn't be removed or
+  tagged from the control page, and an id equal to another row's label caught
+  `!wheel removeEntry <label>`. An id in a list is now kept only if it looks like one the
+  sidecar made (`e_…`) and no earlier row holds it. Any other row gets a new one.
+- **`"removeOnDraw": "false"` in `config.json` turned it on,** as did any other value
+  that wasn't empty, so every spin removed its winner. As in `setSettings`, only `true`
+  or `"true"` turn it on now.
+- **A damaged last draw in `config.json` reached the overlay.** A saved `lastSpin` with
+  a bad field was replayed as it stood, and could break the wheel's drawing until the
+  next spin. It is now dropped, and only the fields a spin has go back out.
+- **Viewer text could forge lines in the sidecar's log.** A newline or terminal escape
+  in a label, typed as `\n` or `\u001b` in `!wheel` JSON, reached the log as the real
+  character. Control characters now print escaped, so one log call stays one line.
+
 ### Documentation
 
 - Setup and update steps said to click Compile, which only tests the code. A reader
   who stopped there kept the old action. They now say Save and Compile, including in
   the 1.0.12 notes below.
+
+Verified offline: `verify` 209/209. None of these fixes has run on a live Streamer.bot.
 
 ## [1.0.12] — 2026-11-01
 

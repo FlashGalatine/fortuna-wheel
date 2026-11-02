@@ -87,7 +87,7 @@ Commands the sidecar understands (`value` is a string; JSON where noted):
 | `removeEntry` | entry id or exact label (case-insensitive) | control page |
 | `setTag` | JSON `{id, tag}` | control page |
 | `clearEntries` | `all` \| `chat` \| `streamer` | control page |
-| `setEntries` | JSON array of `{label, tag?, source?}` — batched full replace; `[]` clears, and a list with nothing usable in it is refused | control page |
+| `setEntries` | JSON array of `{label, tag?, source?, user?, userId?, id?}` — batched full replace; `[]` clears, and a list with nothing usable in it is refused. An `id` is kept only if it looks like one the sidecar made (`e_…`) and no earlier row holds it; any other row gets a new one | control page |
 | `openEntries` | JSON `{maxEntries?, windowSec?}` | control page / `!wheel openEntries` |
 | `closeEntries` | — | control page / `!wheel closeEntries` |
 | `entry` | — (label = the chatter's name; deduped by `userId`) | chat `!entry` |

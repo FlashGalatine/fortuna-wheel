@@ -8,7 +8,8 @@
 //   4. Sidecar E2E: the REAL fortuna-sidecar.mjs runs against the mock —
 //      entry CRUD, chat !entry dedupe + limits + auto-close, spin lifecycle
 //      (spinning → revealed), channel point redeems, removeOnDraw / removeDrawn,
-//      hostile chat JSON, restart persistence.
+//      hostile chat JSON, restart persistence, a bad saved config, and the crashes
+//      chat can't reach: a reset guard socket, a closed stdout, a throw in a timer.
 //   5. The REAL actions/fortuna-command.cs, compiled with the .NET Framework's csc
 //      against a stub CPH (tools/action-harness.cs). Proves its logic and C# 5
 //      syntax, not real Streamer.bot behavior. Skipped when csc isn't installed.
@@ -19,6 +20,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { readFile, writeFile, rm } from 'node:fs/promises';
+import { connect } from 'node:net';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -197,6 +199,8 @@ async function testHttp() {
   check('panel-core served', (await fetch(`${HTTP}/fortuna-shared/panel-core.js`)).status === 200);
   check('control page served', (await fetch(`${HTTP}/fortuna-shared/control.html`)).status === 200);
   check('traversal guarded', (await fetch(`${HTTP}/fortuna-shared/..%2Fconfig.example.json`)).status === 404);
+  check('malformed URL refused', (await fetch(`${HTTP}/%E0%A4%A`)).status === 400);
+  check('mock outlives a malformed URL', (await fetch(`${HTTP}/mock/stats`)).ok);
 }
 
 // ── 4. Sidecar E2E ────────────────────────────────────────────────────────────
@@ -204,14 +208,15 @@ async function testHttp() {
 let sidecarProc = null;
 let sidecarOut = '';
 
-function spawnSidecar(cfgPath) {
-  const proc = spawn(process.execPath, [resolve(__dirname, 'fortuna-sidecar.mjs')], {
+function spawnSidecar(cfgPath, { execArgv = [], env = {} } = {}) {
+  const proc = spawn(process.execPath, [...execArgv, resolve(__dirname, 'fortuna-sidecar.mjs')], {
     env: {
       ...process.env,
       SB_WS_URL: WS_URL,
       FORTUNA_CONFIG: cfgPath,
       FORTUNA_GUARD_PORT: String(GUARD_PORT),
       FORTUNA_SPIN_MS: String(SPIN_MS),
+      ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -252,6 +257,16 @@ async function testSidecar() {
     request: 'DoAction', id: 'c', action: { name: 'Fortuna Command' },
     args: { command, value: value ?? '', ...(extra || {}) },
   }));
+
+  // One spin, start to reveal. Every update re-carries the last revealed spin, so the
+  // reveal wait is scoped to this spin's id.
+  const drawSpin = async (value) => {
+    const at = mark();
+    cmd('spin', value);
+    const spinning = await since(at, (d) => isUpdate(d) && d.spin?.state === 'spinning');
+    const revealed = spinning && await since(at, (d) => isUpdate(d) && d.spin?.state === 'revealed' && d.spin.spinId === spinning.spin.spinId);
+    return { spinning, revealed };
+  };
 
   // Startup: the sidecar re-seeds the persisted payload and announces itself.
   const s0 = await client.next(isStatus).then(parseStatus);
@@ -606,6 +621,74 @@ async function testSidecar() {
     check(`sidecar: !wheel ${input} keeps what's usable`, r.alive && JSON.stringify(got) === JSON.stringify(want), JSON.stringify(r));
   }
 
+  // Removal and setTag go by id. findEntry trims its key, so a blank or padded id could never
+  // match, and it tries ids first, so an id like "Alpha" would catch another row's label.
+  for (const [kind, id] of [['blank', '   '], ['padded', ' e_p1 '], ['label-shaped', 'Alpha']]) {
+    const r = await hostile(viewerSays(`setEntries [{"label":"Stuck","id":${JSON.stringify(id)}},{"label":"Other"}]`));
+    const stuckId = r.updates.at(-1)?.entries[0].id;
+    const rTag = await hostile(() => cmd('setTag', JSON.stringify({ id: stuckId, tag: 'bad' })));
+    const rGone = await hostile(() => cmd('removeEntry', stuckId ?? ''));
+    check(`sidecar: a row sent with a ${kind} id can be tagged and removed`,
+      r.alive && stuckId !== id && rTag.updates.at(-1)?.entries[0].tag === 'bad'
+        && JSON.stringify(rGone.updates.at(-1)?.entries.map((e) => e.label)) === '["Other"]',
+      JSON.stringify({ stuckId, rTag: rTag.lastError, rGone: rGone.lastError }));
+  }
+  await hostile(viewerSays('setEntries [{"label":"Alpha"},{"label":"Bravo","id":"Alpha"}]'));
+  const rByLabel = await hostile(viewerSays('removeEntry Alpha'));
+  check('sidecar: an id can\'t catch removal by another row\'s label',
+    JSON.stringify(rByLabel.updates.at(-1)?.entries.map((e) => e.label)) === '["Bravo"]', JSON.stringify(rByLabel));
+
+  // A repeated id: the first holder keeps it, and a draw removes the row it drew.
+  const rRepeat = await hostile(viewerSays('setEntries [{"id":"e_x","label":"A"},{"id":"e_x","label":"B"},{"id":"e_x","label":"C"},{"id":"e_x","label":"D"}]'));
+  const repeated = rRepeat.updates.at(-1)?.entries ?? [];
+  check('sidecar: setEntries keeps the first holder of a repeated id and renames the rest',
+    repeated[0]?.id === 'e_x' && new Set(repeated.map((e) => e.id)).size === 4, JSON.stringify(repeated));
+  const { revealed: uRepeat } = await drawSpin('{"removeAfter":true}');
+  check('sidecar: a draw from that list removes the row it drew',
+    uRepeat?.entries.length === 3 && !uRepeat.entries.some((e) => e.label === uRepeat.spin.selectedEntry.label), JSON.stringify(uRepeat));
+
+  // Viewer and relay text can carry newlines and terminal escapes: JSON decodes them into
+  // a label, and a relay can send them raw. One log call must stay one physical line.
+  const FORGED = '\n[2026-01-01T00:00:00.000Z] [fortuna] shutting down\u001b[2J\u009b1m\u2028';
+  const atLog = sidecarOut.length;
+  await hostile(viewerSays(`setEntries [{"label":${JSON.stringify(`x${FORGED}`)}}]`));
+  await drawSpin();
+  for (const body of [
+    { command: `noSuchCommand${FORGED}` },
+    { command: 'status', value: `v${FORGED}`, user: `u${FORGED}` },
+    { command: 'removeEntry', value: `nobody${FORGED}` },
+    { command: 'L'.repeat(300), user: 'L'.repeat(300) },
+  ]) await hostile(relay(body));
+  await hostile(() => cmd('openEntries', '{"maxEntries":5,"windowSec":0}'));
+  await hostile(relay({ command: 'entry', user: `chatter${FORGED}` }));
+  await hostile(relay({ command: 'entry', user: 'L'.repeat(300) }));
+  await hostile(() => cmd('closeEntries'));
+  await hostile(viewerSays('setEntries [{"label":"Plain — Привет"}]'));
+  await drawSpin();
+  const logWritten = () => /REVEALED "Plain — Привет"/.test(sidecarOut.slice(atLog));
+  for (let i = 0; i < 15 && !logWritten(); i++) await sleep(100);
+  const logged = sidecarOut.slice(atLog);
+  const badLines = logged.split('\n').filter((l) => l && !l.startsWith('['));
+  check('sidecar: viewer and relay text can\'t start a new log line',
+    logWritten() && !/^\[2026-01-01/m.test(logged) && badLines.length === 0, JSON.stringify(badLines));
+  check('sidecar: control characters print escaped in the log',
+    logWritten() && !/[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029]/.test(logged) && logged.includes('\\u001b[2J'), logged.slice(0, 400));
+  check('sidecar: long text is capped in the log', logWritten() && !logged.includes('L'.repeat(121)), logged.slice(0, 400));
+  check('sidecar: plain text prints unchanged in the log', logWritten() && logged.includes('SPIN → [0] "Plain — Привет"'), logged.slice(-300));
+
+  // Nothing talks to the guard port, so a client that connects and resets must not matter.
+  const guardReset = () => new Promise((res) => {
+    const s = connect(GUARD_PORT, '127.0.0.1', () => { s.resetAndDestroy(); setTimeout(res, 300); });
+    s.on('error', res);
+  });
+  const rReset = await hostile(guardReset);
+  check('sidecar: a reset on the guard port doesn\'t end the process', rReset.alive && sidecarProc.exitCode === null, JSON.stringify(rReset));
+  const guardHeld = await new Promise((res) => {
+    const s = connect(GUARD_PORT, '127.0.0.1', () => { s.destroy(); res(true); });
+    s.on('error', () => res(false));
+  });
+  check('sidecar: the guard port stays bound after a reset', guardHeld);
+
   // An empty list still clears on purpose. Then the wheel goes back for the restart checks.
   const rEmpty = await hostile(viewerSays('setEntries []'));
   check('sidecar: !wheel setEntries [] still clears the wheel', rEmpty.alive && rEmpty.after.entryCount === 0, JSON.stringify(rEmpty));
@@ -634,6 +717,126 @@ async function testSidecar() {
   check('sidecar: restart restores last revealed spin',
     uRestart?.spin?.state === 'revealed' && uRestart.spin.spinId === lastSpinBefore.spinId, JSON.stringify(uRestart?.spin ?? null));
   check('sidecar: entry window never restarts open', uRestart?.entryMode.open === false);
+
+  // ── Booting from a saved config ──
+  // config.json can hold anything: a hand edit, or a value that was never valid.
+  const reboot = async (config, options) => {
+    if (sidecarProc.exitCode === null) {
+      const exited = new Promise((res) => sidecarProc.once('exit', res));
+      sidecarProc.kill();
+      await exited;
+    }
+    if (config) await writeFile(cfgPath, JSON.stringify(config), 'utf-8');
+    const at = mark();
+    sidecarProc = spawnSidecar(cfgPath, options);
+    const update = await since(at, isUpdate, 5000);
+    const status = await since(at, isStatus, 5000);
+    return { update, status: status && parseStatus(status) };
+  };
+  const THROWS = { toString: 1 };
+  const savedEntries = [
+    { id: 'e_a', label: 'A', tag: 'good', source: 'streamer' },
+    { id: 'e_b', label: 'B', tag: 'bad', source: 'streamer' },
+    { id: 'e_c', label: 'C', tag: 'neutral', source: 'streamer' },
+  ];
+  const savedConfig = {
+    entries: savedEntries, entryMode: { open: false, maxEntries: 25, windowSec: 0, openedAt: null },
+    settings: { removeOnDraw: false, defaultChatTag: 'good' }, lastSpin: null, revision: 7,
+  };
+
+  // Same rule as the live setSettings: only true or "true" turn it on.
+  for (const [saved, want] of [['false', false], [THROWS, false], [1, false], ['true', true], [true, true]]) {
+    const { status } = await reboot({ ...savedConfig, settings: { removeOnDraw: saved, defaultChatTag: 'good' } });
+    check(`sidecar: a saved removeOnDraw of ${JSON.stringify(saved)} loads as ${want}`, status?.settings.removeOnDraw === want, JSON.stringify(status?.settings));
+  }
+
+  const { update: uSavedIds } = await reboot({ ...savedConfig, entries: [
+    { id: 'e_keep', label: 'Keep' }, { id: 'e_keep', label: 'Repeat' }, { id: '   ', label: 'Blank' }, { id: ' e_p ', label: 'Padded' }, { id: 'Keep', label: 'Named' },
+  ] });
+  const savedIds = uSavedIds?.entries.map((e) => e.id) ?? [];
+  check('sidecar: a saved list loads with usable, distinct ids', savedIds.length === 5 && savedIds[0] === 'e_keep'
+    && new Set(savedIds).size === 5 && savedIds.every((id) => id.startsWith('e_') && id === id.trim()), JSON.stringify(savedIds));
+
+  // A saved spin is replayed to every overlay, which does arithmetic on its fields.
+  const savedSpin = {
+    spinId: 's_saved', entryCount: 3, selectedIndex: 1, selectedEntry: savedEntries[1], seed: 12345,
+    startedAt: '2026-01-01T00:00:00.000Z', durationMs: 6000, extraSpins: 5, state: 'revealed',
+  };
+  const { update: uSavedSpin, status: sSavedSpin } = await reboot({ ...savedConfig, lastSpin: { ...savedSpin, junk: THROWS } });
+  check('sidecar: a saved spin comes back, without fields it doesn\'t know',
+    JSON.stringify(uSavedSpin?.spin) === JSON.stringify(savedSpin) && sSavedSpin?.lastSpin?.label === 'B', JSON.stringify(uSavedSpin?.spin));
+  const { update: uFixedTag, status: sFixedTag } = await reboot({ ...savedConfig, lastSpin: { ...savedSpin, selectedEntry: { id: 'e_b', label: 'B', tag: THROWS } } });
+  check('sidecar: a saved spin\'s bad tag reads as neutral', uFixedTag?.spin?.selectedEntry.tag === 'neutral' && sFixedTag?.lastSpin?.tag === 'neutral', JSON.stringify(uFixedTag?.spin));
+  for (const [name, bad] of [
+    ['a spinId that throws', { spinId: THROWS }],
+    ['a label that throws', { selectedEntry: { id: 'e_b', label: THROWS } }],
+    ['a selectedEntry that isn\'t an entry', { selectedEntry: 'B' }],
+    ['an entryCount that throws', { entryCount: THROWS }],
+    ['an entryCount over the wheel\'s limit', { entryCount: 201 }],
+    ['a selectedIndex off the wheel', { selectedIndex: 3 }],
+    ['a seed that isn\'t a number', { seed: '12345' }],
+    ['a durationMs that isn\'t a number', { durationMs: THROWS }],
+    ['a durationMs of 0', { durationMs: 0 }],
+    ['extraSpins that aren\'t a number', { extraSpins: null }],
+    ['a startedAt that isn\'t a date', { startedAt: 'soon' }],
+    ['a state other than revealed', { state: 'spinning' }],
+  ]) {
+    const { update, status } = await reboot({ ...savedConfig, lastSpin: { ...savedSpin, ...bad } });
+    check(`sidecar: a saved spin with ${name} is dropped`, !!update && update.spin === null && status?.lastSpin === null, JSON.stringify(update?.spin));
+  }
+
+  // ── Crashes chat can't reach ──
+  // Launched with a pipe whose reader goes away, the next log lines fail on a later tick,
+  // outside any try/catch. hostile() sends a command, which logs. Commands and a spin both.
+  await reboot(savedConfig);
+  const piped = sidecarProc; // hostile() replaces a sidecar that died
+  piped.stdout.destroy();
+  const { revealed: uPiped } = await drawSpin();
+  for (let i = 0; i < 3; i++) { await hostile(viewerSays('addEntry Still here')); await sleep(100); }
+  check('sidecar: a closed stdout doesn\'t end the process', !!uPiped && piped.exitCode === null && sidecarProc === piped, `exit code ${piped.exitCode}`);
+
+  // A throw in a timer, where dispatch's try/catch can't see it. No known input causes one,
+  // so tools/throw-on-log.cjs throws from a chosen log line, with no hook in the sidecar.
+  const withFaults = {
+    execArgv: ['--require', resolve(__dirname, 'tools', 'throw-on-log.cjs')],
+    env: { FORTUNA_THROW_ON: 'SPIN .*"BoomSpin"|REVEALED "BoomReveal"|entries CLOSED \\(time\\)' },
+  };
+  const noted = (at, text) => since(at, (d) => isStatus(d) && parseStatus(d).lastError.includes(text), 1500).then((d) => d && parseStatus(d));
+  const nextSpinWorks = async () => {
+    const at = mark();
+    cmd('setEntries', '[{"label":"Next"}]');
+    await since(at, (d) => isUpdate(d) && d.entries[0]?.label === 'Next');
+    return !!(await drawSpin()).revealed;
+  };
+
+  // The reveal throws after the winner is removed: the surfaces still hear where it got to.
+  await reboot({ ...savedConfig, entries: [{ id: 'e_boom', label: 'BoomReveal' }] }, withFaults);
+  const atBoom = mark();
+  const { revealed: uBoom } = await drawSpin('{"removeAfter":true}');
+  const sBoom = await noted(atBoom, 'reveal failed: injected fault');
+  check('sidecar: a throw in a spin\'s reveal doesn\'t end the process', sidecarProc.exitCode === null && sBoom?.spinning === false, JSON.stringify(sBoom));
+  check('sidecar: that spin still reaches the overlay as revealed', uBoom?.entries.length === 0, JSON.stringify(uBoom ?? null));
+  check('sidecar: the next spin isn\'t refused after a throw in a reveal', await nextSpinWorks(), JSON.stringify(client.events.filter(isStatus).pop()?.value));
+
+  // spin() itself throws, inside dispatch's catch: the spin must not be left with no timer.
+  await reboot({ ...savedConfig, entries: [{ id: 'e_boom', label: 'BoomSpin' }] }, withFaults);
+  const atBoomSpin = mark();
+  cmd('spin');
+  const sBoomSpin = await noted(atBoomSpin, 'a command failed: injected fault');
+  const uBoomSpin = await since(atBoomSpin, (d) => isUpdate(d) && d.spin?.state === 'revealed' && d.spin.selectedEntry.label === 'BoomSpin');
+  check('sidecar: a throw while a spin starts still ends in its reveal', sBoomSpin?.spinning === true && !!uBoomSpin, JSON.stringify({ sBoomSpin, uBoomSpin }));
+  check('sidecar: the next spin isn\'t refused after a throw while a spin starts', await nextSpinWorks(), JSON.stringify(client.events.filter(isStatus).pop()?.value));
+
+  // An entry window's close timer throws after the window shut.
+  await reboot(savedConfig, withFaults);
+  const atBoomClose = mark();
+  cmd('openEntries', '{"maxEntries":5,"windowSec":1}');
+  await since(atBoomClose, (d) => isUpdate(d) && d.entryMode.open);
+  const atBoomClosed = mark();
+  const sBoomClose = await since(atBoomClosed, (d) => isStatus(d) && parseStatus(d).lastError.includes('close failed: injected fault'), 3000).then((d) => d && parseStatus(d));
+  const uBoomClose = await since(atBoomClosed, (d) => isUpdate(d) && !d.entryMode.open, 1000);
+  check('sidecar: a throw in an entry window\'s close doesn\'t end the process', sidecarProc.exitCode === null && sBoomClose?.entryMode.open === false, JSON.stringify(sBoomClose));
+  check('sidecar: that window still reaches the overlay as closed', !!uBoomClose, 'no closed update');
 
   client.ws.close();
   await rm(cfgPath, { force: true });
