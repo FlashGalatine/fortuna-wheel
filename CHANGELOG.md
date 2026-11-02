@@ -10,6 +10,16 @@ traceability.
 
 ## [Unreleased]
 
+**To upgrade,** get the new files and restart the sidecar.
+
+### Changed
+
+- **A script's own ids and loose `removeOnDraw` values no longer carry over.** An `id` in
+  `setEntries` or `config.json` is kept only if it looks like one the sidecar made
+  (`e_…`), so a script that goes by its own ids has to read the new ones from the update.
+  In `config.json`, only `true` or `"true"` turn `removeOnDraw` on, so a value like `1`
+  now reads as off.
+
 ### Fixed
 
 - **A throw in a timer could stop the sidecar.** 1.0.12 logged and dropped a throw while a
@@ -17,31 +27,46 @@ traceability.
   reveal or a timed entry window's close. Those are now logged and dropped too, with the
   error on the control page, though it may leave that work half applied. A spin that hits
   one still reveals, and the next spin isn't refused. No known input causes one.
+- **A failure nothing else caught could stop the sidecar.** A throw or rejected promise
+  outside a command or timer, like one as the Streamer.bot connection opens, ended the
+  process. Once the sidecar is running, it's now logged and dropped the same way. A failed
+  startup still ends the process. No known input causes one.
 - **A stray connection could stop the sidecar.** Any program on the PC that connected
   to the single-instance guard port (7493) and reset the connection ended the process,
   and the wheel stayed down until restarted. The port now hangs up on whatever connects.
 - **A closed log pipe could stop the sidecar.** Started with something like
   `npm run sidecar | tee fortuna.log`, the process ended once the reader had exited and
-  it next logged. It now keeps running without its log.
+  it next logged. It now keeps running without its log. A closed stderr is treated the
+  same way.
 - **Removing a drawn entry could remove a different one.** Rows sharing an id, from
   `setEntries` or a hand-edited `config.json`, all answered to the first of them, so
   drawing the second removed the first. A blank or padded id couldn't be removed or
   tagged from the control page, and an id equal to another row's label caught
   `!wheel removeEntry <label>`. An id in a list is now kept only if it looks like one the
-  sidecar made (`e_…`) and no earlier row holds it. Any other row gets a new one.
+  sidecar made (`e_…`) and no earlier row holds it. Any other row gets a new one, and at
+  startup a saved winner follows its row to the new id. After a restart, "Remove it from the
+  wheel" takes the right row or refuses. It refuses when no row has the winner's saved id
+  and label, which includes a row renamed by hand.
 - **`"removeOnDraw": "false"` in `config.json` turned it on,** as did any other value
   that wasn't empty, so every spin removed its winner. As in `setSettings`, only `true`
   or `"true"` turn it on now.
 - **A damaged last draw in `config.json` reached the overlay.** A saved `lastSpin` with
   a bad field was replayed as it stood, and could break the wheel's drawing until the
-  next spin. It is now dropped, and only the fields a spin has go back out.
+  next spin. It is now dropped, with a log line and a control page note naming the field.
+  A block that passes comes back whole, including any field the sidecar doesn't check. A
+  `lastSpin` with a hand-edited or missing `state`, or one that isn't an object, was
+  already dropped, but with no word of it. It now gets the same line and note, naming
+  `state` or `lastSpin`. Only `null` or no `lastSpin` at all stays quiet.
 - **Viewer text could forge lines in the sidecar's log.** A newline or terminal escape
   in a label, typed as `\n` or `\u001b` in `!wheel` JSON, reached the log as the real
-  character. Control characters now print escaped, so one log call stays one line.
+  character. Control characters and Unicode direction controls now print escaped, and a
+  logged error keeps its name, its escaped message and its stack frames, so a log call
+  can't start a line of its own.
 - **A settings change didn't reach `fortuna:update`.** `setSettings` only sent a status,
   so a custom overlay reading `settings` from the update, or connecting later and getting
-  the replay, saw the old values until the next change. It now pushes an update like every
-  other change.
+  the replay, saw the old values until the next change. A change now pushes an update too,
+  at the same `revision`, because the wheel itself hasn't changed. A `setSettings` that
+  changes nothing still sends only a status.
 
 ### Documentation
 
@@ -52,7 +77,8 @@ traceability.
   has no wheel of its own, it never sends `setEntries`, `spin` stays non-null after the
   first draw, and an unknown command or an ignored `entry` gets no status back.
 
-Verified offline: `verify` 231/231. None of these fixes has run on a live Streamer.bot.
+Verified offline: `verify` 266/266, `verify:render` 15/15. None of these fixes has run on a
+live Streamer.bot.
 
 ## [1.0.12] — 2026-11-01
 

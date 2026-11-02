@@ -43,6 +43,8 @@ wheel-specific** — a Magic 8-ball theme is a valid consumer (docs/THEMING.md).
 }
 ```
 
+- `revision` rises with every change to the wheel. A `setSettings` change sends an
+  update at the same `revision`, because the wheel itself hasn't changed.
 - `tag` is `good | bad | neutral` — it selects the reveal effect (confetti /
   rain / glow).
 - `spin` is `null` until the first draw. After that it holds the in-flight block
@@ -97,7 +99,7 @@ Commands the sidecar understands (`value` is a string; JSON where noted):
 | `entry` | — (label = the chatter's name; deduped by `userId`) | chat `!entry` |
 | `spin` | optional JSON `{removeAfter?: bool}` | control page / `!wheel spin` / Reward Redemption trigger |
 | `removeDrawn` | — removes the last revealed spin's entry | control page |
-| `setSettings` | JSON `{removeOnDraw?, defaultChatTag?}` — batched | control page |
+| `setSettings` | JSON `{removeOnDraw?, defaultChatTag?}` — batched. A change sends an update at the same `revision`; anything else sends only a status | control page |
 | `status` | — request a `fortuna:status` snapshot | any |
 | `__status` | reserved — the sidecar's own status relay (see below) | sidecar only |
 
@@ -110,10 +112,10 @@ click. Follow the same rule from Stream Deck and chat macros.
 
 Status must never clobber the persisted update payload, so it rides the
 `Fortuna Command` relay as reserved command `__status` with the JSON in `value`
-(no third SB action). Sent after a state change, after a command that fails, and when
-the sidecar connects. An unknown command and an ignored `entry` (closed window or
-duplicate) send none. Send `status` to force a snapshot; the control page probes
-every 10 seconds.
+(no third SB action). Sent after a state change, after a command that fails, after a
+`setSettings` that changes nothing, and when the sidecar connects. An unknown command
+and an ignored `entry` (closed window or duplicate) send none. Send `status` to force a
+snapshot; the control page probes every 10 seconds.
 
 ```json
 { "type": "fortuna:status", "connected": true,

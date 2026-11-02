@@ -96,11 +96,15 @@ async function loadConfig() {
 
 function adoptConfig(parsed) {
   if (!parsed || typeof parsed !== 'object') return;
+  const rows = (Array.isArray(parsed.entries) ? parsed.entries : [])
+    .map((raw) => ({ savedId: raw?.id, entry: normalizeEntry(raw) }))
+    .filter((row) => row.entry)
+    .slice(0, MAX_ENTRIES);
+  const entries = uniqueIds(rows.map((row) => row.entry));
+  const lastSpin = normalizeSpin(parsed.lastSpin);
+  if (lastSpin) pointWinnerAtRow(lastSpin, parsed.lastSpin.selectedEntry.id, rows);
   config = {
-    entries: uniqueIds((Array.isArray(parsed.entries) ? parsed.entries : [])
-      .map(normalizeEntry)
-      .filter(Boolean)
-      .slice(0, MAX_ENTRIES)),
+    entries,
     entryMode: {
       // The entry window never survives a restart open — its timer died with the
       // old process, and silently collecting entries forever would be worse.
@@ -113,9 +117,21 @@ function adoptConfig(parsed) {
       removeOnDraw: parsed.settings?.removeOnDraw === true || parsed.settings?.removeOnDraw === 'true',
       defaultChatTag: TAGS.includes(parsed.settings?.defaultChatTag) ? parsed.settings.defaultChatTag : 'good',
     },
-    lastSpin: normalizeSpin(parsed.lastSpin),
+    lastSpin,
     revision: clampInt(parsed.revision, 0, Number.MAX_SAFE_INTEGER, 0),
   };
+}
+
+// normalizeEntry and uniqueIds can give a saved row a new id, and the saved winner has to
+// follow it or removeDrawn takes the wrong row or none. A row matches on the id and label
+// both were saved with, and selectedIndex settles a tie. A winner with no match can't hold a
+// row's id, or removeDrawn takes that row, so it gets a new one and removeDrawn refuses. A row
+// renamed by hand refuses too, which is the safe way to fail.
+function pointWinnerAtRow(spin, savedId, rows) {
+  const matches = rows.filter((row) => row.savedId === savedId && row.entry.label === spin.selectedEntry.label);
+  const row = matches.find((match) => match === rows[spin.selectedIndex]) ?? matches[0];
+  if (row) { spin.selectedEntry.id = row.entry.id; return; }
+  while (rows.some((other) => other.entry.id === spin.selectedEntry.id)) spin.selectedEntry.id = newId('e');
 }
 
 function normalizeEntry(e) {
@@ -149,19 +165,30 @@ function uniqueIds(entries) {
 
 // Only a completed spin is worth restoring; a half-finished one is meaningless
 // after a restart (its reveal timer is gone). It gets replayed to every overlay, whose
-// arithmetic on these fields throws on an object, so one bad field drops the whole block,
-// and only the known fields go back out.
+// arithmetic on these fields throws on an object, so one bad field drops the whole block.
+// A save only ever writes null or a revealed spin, so null or no block means no draw yet, and
+// anything else is a hand edit. The next save overwrites it, so the log and the note say which
+// field, or lastSpin for a block that isn't one. A field this doesn't check goes back out as
+// it came.
 function normalizeSpin(s) {
-  if (!s || typeof s !== 'object' || s.state !== 'revealed') return null;
+  if (s == null) return null;
   const selectedEntry = normalizeEntry(s.selectedEntry);
-  const { spinId, entryCount, selectedIndex, seed, startedAt, durationMs, extraSpins } = s;
-  const usable = selectedEntry && spinId && typeof spinId === 'string'
-    && Number.isInteger(entryCount) && entryCount >= 1 && entryCount <= MAX_ENTRIES
-    && Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < entryCount
-    && Number.isFinite(seed) && Number.isFinite(extraSpins)
-    && Number.isFinite(durationMs) && durationMs > 0
-    && typeof startedAt === 'string' && !Number.isNaN(Date.parse(startedAt));
-  return usable ? { spinId, entryCount, selectedIndex, selectedEntry, seed, startedAt, durationMs, extraSpins, state: 'revealed' } : null;
+  const { state, spinId, entryCount, selectedIndex, seed, startedAt, durationMs, extraSpins } = s;
+  const bad = typeof s !== 'object' || Array.isArray(s) ? 'lastSpin'
+    : state !== 'revealed' ? 'state'
+    : !spinId || typeof spinId !== 'string' ? 'spinId'
+    : !(Number.isInteger(entryCount) && entryCount >= 1 && entryCount <= MAX_ENTRIES) ? 'entryCount'
+    : !(Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < entryCount) ? 'selectedIndex'
+    : !selectedEntry ? 'selectedEntry'
+    : !Number.isFinite(seed) ? 'seed'
+    : typeof startedAt !== 'string' || Number.isNaN(Date.parse(startedAt)) ? 'startedAt'
+    : !(Number.isFinite(durationMs) && durationMs > 0) ? 'durationMs'
+    : !Number.isFinite(extraSpins) ? 'extraSpins'
+    : null;
+  if (!bad) return { ...s, selectedEntry };
+  lastError = `config.json: the saved last draw has a bad ${bad}, so it was dropped`;
+  log(lastError);
+  return null;
 }
 
 async function persist() {
@@ -264,17 +291,26 @@ function fail(msg) {
 // The note carries the error because a hidden launch has no log to read.
 function noteThrow(what, err) {
   lastError = `${what} failed: ${err?.message ?? err}`;
-  log(lastError, `\n${err?.stack ?? err}`);
+  // Only the stack's frame lines: its first line repeats the message, which can quote a value.
+  try {
+    log(`${lastError}${err?.name ? ` (${err.name})` : ''}`, String(err?.stack ?? '').split('\n').filter((line) => /^\s+at /.test(line)));
+  } catch { /* the note is the record */ }
   try { pushStatus(); } catch { /* the log line is the record */ }
 }
 
 // setTimeout for the part of a command that runs later, where the try/catch around
-// dispatch can't see it and a throw would end the process. A throw here got part way,
-// so the surfaces still hear the state it reached.
+// dispatch can't see it. A throw here got part way, so the surfaces still hear the state
+// it reached, which the process-level backstop wouldn't tell them.
 function later(what, ms, fn) {
   return setTimeout(() => {
+    const revision = config.revision;
     try { fn(); } catch (err) {
-      try { config.revision++; persist(); pushUpdate(); } catch { /* noteThrow still reports it */ }
+      // fn may have raised the revision before it threw, and one change counts once.
+      try {
+        if (config.revision === revision) config.revision++;
+        persist();
+        pushUpdate();
+      } catch { /* noteThrow still reports it */ }
       noteThrow(what, err);
     }
   }, ms);
@@ -472,11 +508,18 @@ function dispatch(command, value, user, userId) {
     }
     case 'setSettings': {
       const o = parseJson(value);
+      const before = JSON.stringify(config.settings);
       if (o && typeof o === 'object') {
         if (o.removeOnDraw !== undefined) config.settings.removeOnDraw = o.removeOnDraw === true || o.removeOnDraw === 'true';
         if (o.defaultChatTag !== undefined && TAGS.includes(o.defaultChatTag)) config.settings.defaultChatTag = o.defaultChatTag;
       }
-      applyChange();
+      // Not applyChange: the wheel itself hasn't changed, so the revision stays. A new value
+      // still has to reach the replay.
+      if (JSON.stringify(config.settings) !== before) {
+        persist();
+        pushUpdate();
+      }
+      pushStatus();
       return;
     }
     case 'status': pushStatus(); return;
@@ -545,23 +588,26 @@ function doAction(name, args) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-// One call is one physical line. Viewer text can hold newlines and terminal escapes (JSON
-// "\n" and "\u001b" decode into a label), and a forged line would look genuine, so control
-// characters print escaped. Only `detail` goes out raw: a stack, with no viewer text in it.
-function log(msg, detail = '') {
-  const line = String(msg).replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-  console.log(`[${new Date().toISOString()}] [fortuna] ${line}${detail}`);
+// One call is one physical line, plus a stack's frame lines. Viewer text can hold newlines and
+// terminal escapes (JSON "\n" and "\u001b" decode into a label), and a forged line would look
+// genuine, so control characters print escaped everywhere, frame lines included. So do Unicode
+// direction controls, which can reorder how a line displays.
+function log(msg, frames = []) {
+  const printable = (text) => String(text).replace(/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  console.log(`[${new Date().toISOString()}] [fortuna] ${printable(msg)}${frames.map((frame) => `\n${printable(frame)}`).join('')}`);
 }
 
-// A closed stdout (the reader of a "| tee" exited, or a launcher left node running) fails
-// the write on a later tick, past any try/catch, and an unhandled 'error' would end the
-// process. The wheel matters more than the log.
+// A closed stdout or stderr (the reader of a "| tee" exited, or a launcher left node running)
+// fails the write on a later tick, past any try/catch. Unhandled, the error loops through the
+// backstop, whose own log line fails the same way, and floods statuses, thousands in 2 s. The
+// wheel matters more than the log.
 process.stdout.on('error', () => {});
+process.stderr.on('error', () => {});
 
 function acquireGuard() {
   return new Promise((res) => {
     // Nothing talks to this port, it only has to stay bound. So hang up on whatever connects
-    // and ignore how that goes: an unhandled reset on the socket would end the process.
+    // and ignore how that goes: a reset on the socket isn't a failure worth a note.
     const guard = createServer((socket) => socket.on('error', () => {}).destroy());
     guard.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
@@ -579,6 +625,13 @@ async function main() {
   log(`Fortuna sidecar starting (config: ${CONFIG_PATH})`);
   await acquireGuard();
   await loadConfig();
+  // The last stop for whatever nothing above catches, now that there's a wheel to keep up. A
+  // throw before this point still ends the process: it can't do its job anyway.
+  const backstop = (err) => {
+    try { noteThrow('a background task', err); } catch { /* a throw from here would end the process */ }
+  };
+  process.on('uncaughtException', backstop);
+  process.on('unhandledRejection', backstop);
   connectSb();
   const shutdown = () => {
     log('shutting down');

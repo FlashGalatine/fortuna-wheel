@@ -151,14 +151,15 @@ launches harmless.
 
 - `npm start` — mock Streamer.bot (HTTP :7474 + WS :8080) with a landing page;
   `/mock/fixture` broadcasts a sample wheel, POST `/mock/push` any payload.
-- `npm run verify` — 231 offline checks: spin math determinism, the real
+- `npm run verify` — 266 offline checks: spin math determinism, the real
   panel-core against the mock (subscribe case, sync replay, serialized queue),
   HTTP maps, the mock's copy of the action's mapping, a real sidecar E2E (entry CRUD,
   `!entry` dedupe/limits, spin lifecycle, channel point redeems, hostile chat JSON,
-  restart persistence, a bad saved config, crashes chat can't reach), and the real `fortuna-command.cs` against a stub `CPH`. Those last 43
-  need the .NET Framework's `csc.exe` and are reported as skipped without it; they
-  prove the action's logic, not real Streamer.bot behavior. Uses off-default ports
-  (7478/8084/7494) so it runs beside a live SB.
+  restart persistence, a bad saved config, crashes chat can't reach), and the real
+  `fortuna-command.cs` against a stub `CPH`. Those last 43 need the .NET Framework's
+  `csc.exe` and are reported as skipped without it; they prove the action's logic,
+  not real Streamer.bot behavior. Uses off-default ports (7478/8084/7494) so it runs
+  beside a live SB.
 - `npm run verify:render` — real-pixel checks in a system Edge/Chrome
   (`npm i --no-save playwright-core` first): painted wheel, revealed draw with
   confetti on the fx layer, control page. Writes gitignored PNGs.

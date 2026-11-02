@@ -9,7 +9,8 @@
 //      entry CRUD, chat !entry dedupe + limits + auto-close, spin lifecycle
 //      (spinning → revealed), channel point redeems, removeOnDraw / removeDrawn,
 //      hostile chat JSON, restart persistence, a bad saved config, and the crashes
-//      chat can't reach: a reset guard socket, a closed stdout, a throw in a timer.
+//      chat can't reach: a reset guard socket, a closed stdout or stderr, a throw in a
+//      timer, and whatever else nothing catches.
 //   5. The REAL actions/fortuna-command.cs, compiled with the .NET Framework's csc
 //      against a stub CPH (tools/action-harness.cs). Proves its logic and C# 5
 //      syntax, not real Streamer.bot behavior. Skipped when csc isn't installed.
@@ -509,6 +510,7 @@ async function testSidecar() {
 
   // setSettings batch.
   const atSettings = mark();
+  const revisionBeforeSettings = client.events.filter(isUpdate).pop().revision;
   cmd('setSettings', JSON.stringify({ removeOnDraw: true, defaultChatTag: 'neutral' }));
   const sSet = await client.next((d) => isStatus(d) && parseStatus(d).settings.removeOnDraw).then(parseStatus);
   check('sidecar: setSettings batch', sSet.settings.removeOnDraw === true && sSet.settings.defaultChatTag === 'neutral',
@@ -516,6 +518,10 @@ async function testSidecar() {
   const uSet = await since(atSettings, isUpdate, 1000);
   check('sidecar: setSettings reaches fortuna:update, which is what gets replayed',
     uSet?.settings.removeOnDraw === true && uSet.settings.defaultChatTag === 'neutral', JSON.stringify(uSet?.settings ?? null));
+  check('sidecar: a settings change keeps the revision', uSet?.revision === revisionBeforeSettings, `${revisionBeforeSettings} -> ${uSet?.revision}`);
+  const settingsSaved = () => readFile(cfgPath, 'utf-8').then(JSON.parse).then((saved) => saved.settings.defaultChatTag === 'neutral').catch(() => false);
+  for (let i = 0; i < 15 && !(await settingsSaved()); i++) await sleep(100);
+  check('sidecar: a settings change is saved', await settingsSaved());
 
   // The new default tag reaches a viewer's entry.
   const atTagged = mark();
@@ -616,11 +622,21 @@ async function testSidecar() {
       /^a command failed: \S/.test(relayNote ?? '') && refused(r, relayNote), JSON.stringify(r));
   }
   // The log is the only record of the stack, and it arrives on another stream from the status.
-  const loggedStack = () => /\nTypeError: (.*)\n\s+at /.exec(sidecarOut.slice(atRelayLog));
+  // It gets the error's name and frames: the stack's first line repeats the message, unescaped.
+  const loggedStack = () => /a command failed: (.*) \(TypeError\)\n\s+at /.exec(sidecarOut.slice(atRelayLog));
   for (let i = 0; i < 15 && !loggedStack(); i++) await sleep(100);
   const relayStack = loggedStack();
   check('sidecar: a dropped relay shows its error and logs its stack',
-    !!relayStack && relayNote === `a command failed: ${relayStack[1]}`, `${relayNote} | ${sidecarOut.slice(-300)}`);
+    !!relayStack && relayNote === `a command failed: ${relayStack[1]}` && !sidecarOut.slice(atRelayLog).includes('\nTypeError:'), `${relayNote} | ${sidecarOut.slice(-300)}`);
+
+  // A setSettings with nothing valid or nothing new sends only its status. The status is
+  // what hostile() sees as this input's lastError, so undefined would mean it never came.
+  const settingsNow = JSON.stringify((await hostile(() => {})).after?.settings);
+  for (const input of ['setSettings junk', 'setSettings {}', 'setSettings {"defaultChatTag":"purple"}', `setSettings {"defaultChatTag":${BAD}}`, `setSettings ${settingsNow}`]) {
+    const r = await hostile(viewerSays(input));
+    check(`sidecar: !wheel ${input} sends only a status`,
+      r.alive && r.updates.length === 0 && r.lastError !== undefined && JSON.stringify(r.after.settings) === settingsNow, JSON.stringify(r));
+  }
 
   // A bad option keeps its old value and the window still opens. These updates come from
   // the live state, so they also prove the rows above left the entries alone. The options
@@ -732,7 +748,7 @@ async function testSidecar() {
 
   // Viewer and relay text can carry newlines and terminal escapes: JSON decodes them into
   // a label, and a relay can send them raw. One log call must stay one physical line.
-  const FORGED = '\n[2026-01-01T00:00:00.000Z] [fortuna] shutting down\u001b[2J\u009b1m\u2028';
+  const FORGED = '\n[2026-01-01T00:00:00.000Z] [fortuna] shutting down\u001b[2J\u009b1m\u2028\u202e\u2067\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u2066\u2068\u2069';
   const atLog = sidecarOut.length;
   await hostile(viewerSays(`setEntries [{"label":${JSON.stringify(`x${FORGED}`)}}]`));
   await drawSpin();
@@ -754,8 +770,8 @@ async function testSidecar() {
   const badLines = logged.split('\n').filter((l) => l && !l.startsWith('['));
   check('sidecar: viewer and relay text can\'t start a new log line',
     logWritten() && !/^\[2026-01-01/m.test(logged) && badLines.length === 0, JSON.stringify(badLines));
-  check('sidecar: control characters print escaped in the log',
-    logWritten() && !/[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029]/.test(logged) && logged.includes('\\u001b[2J'), logged.slice(0, 400));
+  check('sidecar: control and direction characters print escaped in the log',
+    logWritten() && !/[\x00-\x09\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/.test(logged) && logged.includes('\\u001b[2J') && logged.includes('\\u202e\\u2067\\u061c\\u200e\\u200f\\u202a\\u202b\\u202c\\u202d\\u2066\\u2068\\u2069'), logged.slice(0, 400));
   check('sidecar: long text is capped in the log', logWritten() && !logged.includes('L'.repeat(121)), logged.slice(0, 400));
   check('sidecar: plain text prints unchanged in the log', logWritten() && logged.includes('SPIN → [0] "Plain — Привет"'), logged.slice(-300));
 
@@ -805,7 +821,7 @@ async function testSidecar() {
 
   // ── Booting from a saved config ──
   // config.json can hold anything: a hand edit, or a value that was never valid.
-  const reboot = async (config, options) => {
+  const reboot = async (config, options, waitMs = 5000) => {
     if (sidecarProc.exitCode === null) {
       const exited = new Promise((res) => sidecarProc.once('exit', res));
       sidecarProc.kill();
@@ -814,8 +830,8 @@ async function testSidecar() {
     if (config) await writeFile(cfgPath, JSON.stringify(config), 'utf-8');
     const at = mark();
     sidecarProc = spawnSidecar(cfgPath, options);
-    const update = await since(at, isUpdate, 5000);
-    const status = await since(at, isStatus, 5000);
+    const update = await since(at, isUpdate, waitMs);
+    const status = await since(at, isStatus, waitMs);
     return { update, status: status && parseStatus(status) };
   };
   const THROWS = { toString: 1 };
@@ -847,27 +863,98 @@ async function testSidecar() {
     spinId: 's_saved', entryCount: 3, selectedIndex: 1, selectedEntry: savedEntries[1], seed: 12345,
     startedAt: '2026-01-01T00:00:00.000Z', durationMs: 6000, extraSpins: 5, state: 'revealed',
   };
-  const { update: uSavedSpin, status: sSavedSpin } = await reboot({ ...savedConfig, lastSpin: { ...savedSpin, junk: THROWS } });
-  check('sidecar: a saved spin comes back, without fields it doesn\'t know',
-    JSON.stringify(uSavedSpin?.spin) === JSON.stringify(savedSpin) && sSavedSpin?.lastSpin?.label === 'B', JSON.stringify(uSavedSpin?.spin));
+  // A field added later has to survive a restart without anyone listing it here.
+  const savedExtras = { spinId: savedSpin.spinId, segments: [{ label: 'A', tag: 'good' }], ...savedSpin, revealRevision: 9, junk: THROWS };
+  const { update: uSavedSpin, status: sSavedSpin } = await reboot({ ...savedConfig, lastSpin: savedExtras });
+  check('sidecar: a saved spin comes back whole, with fields it doesn\'t know, in the same order',
+    JSON.stringify(uSavedSpin?.spin) === JSON.stringify(savedExtras) && sSavedSpin?.lastSpin?.label === 'B', JSON.stringify(uSavedSpin?.spin));
   const { update: uFixedTag, status: sFixedTag } = await reboot({ ...savedConfig, lastSpin: { ...savedSpin, selectedEntry: { id: 'e_b', label: 'B', tag: THROWS } } });
   check('sidecar: a saved spin\'s bad tag reads as neutral', uFixedTag?.spin?.selectedEntry.tag === 'neutral' && sFixedTag?.lastSpin?.tag === 'neutral', JSON.stringify(uFixedTag?.spin));
-  for (const [name, bad] of [
-    ['a spinId that throws', { spinId: THROWS }],
-    ['a label that throws', { selectedEntry: { id: 'e_b', label: THROWS } }],
-    ['a selectedEntry that isn\'t an entry', { selectedEntry: 'B' }],
-    ['an entryCount that throws', { entryCount: THROWS }],
-    ['an entryCount over the wheel\'s limit', { entryCount: 201 }],
-    ['a selectedIndex off the wheel', { selectedIndex: 3 }],
-    ['a seed that isn\'t a number', { seed: '12345' }],
-    ['a durationMs that isn\'t a number', { durationMs: THROWS }],
-    ['a durationMs of 0', { durationMs: 0 }],
-    ['extraSpins that aren\'t a number', { extraSpins: null }],
-    ['a startedAt that isn\'t a date', { startedAt: 'soon' }],
-    ['a state other than revealed', { state: 'spinning' }],
+  // The next save overwrites a dropped block, so the note has to say which field cost it.
+  for (const [name, bad, field] of [
+    ['a spinId that throws', { spinId: THROWS }, 'spinId'],
+    ['a label that throws', { selectedEntry: { id: 'e_b', label: THROWS } }, 'selectedEntry'],
+    ['a selectedEntry that isn\'t an entry', { selectedEntry: 'B' }, 'selectedEntry'],
+    ['an entryCount that throws', { entryCount: THROWS }, 'entryCount'],
+    ['an entryCount over the wheel\'s limit', { entryCount: 201 }, 'entryCount'],
+    ['a selectedIndex off the wheel', { selectedIndex: 3 }, 'selectedIndex'],
+    ['a seed that isn\'t a number', { seed: '12345' }, 'seed'],
+    ['a durationMs that isn\'t a number', { durationMs: THROWS }, 'durationMs'],
+    ['a durationMs of 0', { durationMs: 0 }, 'durationMs'],
+    ['extraSpins that aren\'t a number', { extraSpins: null }, 'extraSpins'],
+    ['a startedAt that isn\'t a date', { startedAt: 'soon' }, 'startedAt'],
   ]) {
     const { update, status } = await reboot({ ...savedConfig, lastSpin: { ...savedSpin, ...bad } });
-    check(`sidecar: a saved spin with ${name} is dropped`, !!update && update.spin === null && status?.lastSpin === null, JSON.stringify(update?.spin));
+    check(`sidecar: a saved spin with ${name} is dropped, and the note names ${field}`,
+      !!update && update.spin === null && status?.lastSpin === null && status.lastError.includes(`bad ${field}`), JSON.stringify({ spin: update?.spin, lastError: status?.lastError }));
+  }
+  const atDropLog = sidecarOut.length;
+  const { status: sTwoBad } = await reboot({ ...savedConfig, lastSpin: { ...savedSpin, seed: '12345', durationMs: 0 } });
+  const dropLogged = () => !!sTwoBad?.lastError && sidecarOut.slice(atDropLog).includes(sTwoBad.lastError);
+  for (let i = 0; i < 15 && !dropLogged(); i++) await sleep(100);
+  check('sidecar: a dropped spin names its first bad field, in the note and the log',
+    sTwoBad?.lastError.includes('bad seed') && dropLogged(), `${sTwoBad?.lastError} | ${sidecarOut.slice(atDropLog, atDropLog + 300)}`);
+  // A save only ever writes null or a revealed spin, so anything else is a hand edit that the
+  // next save overwrites, and the note has to say so.
+  for (const [name, lastSpin, field] of [
+    ['a spin that wasn\'t revealed', { ...savedSpin, state: 'spinning' }, 'state'],
+    ['a saved spin with no state', { ...savedSpin, state: undefined }, 'state'],
+    ['an empty last draw', {}, 'state'],
+    ['a last draw that\'s text', 'B', 'lastSpin'],
+    ['a last draw of 0', 0, 'lastSpin'],
+    ['a last draw of false', false, 'lastSpin'],
+    ['a last draw that\'s empty text', '', 'lastSpin'],
+    ['a last draw that\'s a list', [savedSpin], 'lastSpin'],
+    ['a last draw that\'s an empty list', [], 'lastSpin'],
+  ]) {
+    const atNoteLog = sidecarOut.length;
+    const { update, status } = await reboot({ ...savedConfig, lastSpin });
+    const noteLogged = () => !!status?.lastError && sidecarOut.slice(atNoteLog).includes(status.lastError);
+    for (let i = 0; i < 15 && !noteLogged(); i++) await sleep(100);
+    check(`sidecar: a config with ${name} starts with no spin, and the note and the log name ${field}`,
+      !!update && update.spin === null && status?.lastSpin === null && status.lastError.includes(`bad ${field}`) && noteLogged(), JSON.stringify({ spin: update?.spin, lastError: status?.lastError, log: sidecarOut.slice(atNoteLog, atNoteLog + 300) }));
+  }
+  // These two mean no draw yet, so there's nothing to report. The config loads before the
+  // connection opens, so by the connect line a note would have reached the log.
+  for (const [name, lastSpin] of [['a last draw of null', null], ['no last draw block', undefined]]) {
+    const atQuietLog = sidecarOut.length;
+    const { update, status } = await reboot({ ...savedConfig, lastSpin });
+    const connected = () => sidecarOut.slice(atQuietLog).includes('Connected to Streamer.bot');
+    for (let i = 0; i < 15 && !connected(); i++) await sleep(100);
+    check(`sidecar: a config with ${name} starts with no spin, no note and no log line, its entries kept`,
+      !!update && update.spin === null && status?.lastError === '' && update.entries.length === savedEntries.length
+      && connected() && !sidecarOut.slice(atQuietLog).includes('saved last draw'), JSON.stringify({ lastError: status?.lastError, entries: update?.entries.length, log: sidecarOut.slice(atQuietLog, atQuietLog + 300) }));
+  }
+
+  // removeDrawn after a restart: the id rules can give a saved row a new id, and the saved
+  // winner has to end up on its row, or the wrong row goes, or none does.
+  const drawnBeforeRestart = async (entries, selectedIndex, selectedEntry) => {
+    const { update } = await reboot({ ...savedConfig, entries, lastSpin: { ...savedSpin, entryCount: entries.length, selectedIndex, selectedEntry } });
+    return { update, removed: await hostile(() => cmd('removeDrawn')) };
+  };
+  const tagsLeft = ({ removed }) => JSON.stringify(removed.updates.at(-1)?.entries.map((e) => `${e.label}:${e.tag}`));
+  const rRepeatedId = await drawnBeforeRestart([{ id: 'e_x', label: 'A', tag: 'good' }, { id: 'e_x', label: 'B', tag: 'good' }], 1, { id: 'e_x', label: 'B' });
+  check('sidecar: after a restart, removeDrawn removes the drawn row of a repeated id', tagsLeft(rRepeatedId) === '["A:good"]', JSON.stringify(rRepeatedId.removed));
+  const rCustomId = await drawnBeforeRestart([{ id: 'boss_1', label: 'Boss', tag: 'good' }, { id: 'boss_2', label: 'Minion', tag: 'good' }], 0, { id: 'boss_1', label: 'Boss' });
+  check('sidecar: after a restart, removeDrawn removes a row saved with a custom id', tagsLeft(rCustomId) === '["Minion:good"]', JSON.stringify(rCustomId.removed));
+  const rTwins = await drawnBeforeRestart([{ id: 'e_x', label: 'Twin', tag: 'good' }, { id: 'e_x', label: 'Twin', tag: 'bad' }], 1, { id: 'e_x', label: 'Twin', tag: 'bad' });
+  check('sidecar: after a restart, selectedIndex settles which of two matching rows was drawn', tagsLeft(rTwins) === '["Twin:good"]', JSON.stringify(rTwins.removed));
+  const rSavedId = await drawnBeforeRestart([{ id: 'e_1', label: 'Twin', tag: 'good' }, { id: 'e_2', label: 'Twin', tag: 'bad' }], 0, { id: 'e_2', label: 'Twin', tag: 'bad' });
+  check('sidecar: after a restart, the saved id picks between two rows with one label, ahead of selectedIndex', tagsLeft(rSavedId) === '["Twin:good"]', JSON.stringify(rSavedId.removed));
+  const rNoRow = await drawnBeforeRestart([{ id: 'e_a', label: 'A', tag: 'good' }], 0, { id: 'e_gone', label: 'Gone' });
+  check('sidecar: a saved winner with no row keeps its id, and removeDrawn says it\'s gone',
+    rNoRow.update?.spin.selectedEntry.id === 'e_gone' && rNoRow.removed.lastError === 'removeDrawn: drawn entry is already gone' && rNoRow.removed.updates.length === 0, JSON.stringify(rNoRow));
+  const rOtherLabel = await drawnBeforeRestart([{ id: 'boss_1', label: 'Other', tag: 'good' }], 0, { id: 'boss_1', label: 'Gone' });
+  check('sidecar: a saved winner doesn\'t take the id of a row with another label', rOtherLabel.removed.updates.length === 0 && rOtherLabel.removed.lastError === 'removeDrawn: drawn entry is already gone', JSON.stringify(rOtherLabel.removed));
+  // Here a row still holds the winner's id: the first of a repeated id was drawn and removed,
+  // or the row was renamed by hand. The sidecar can't tell which, so it removes nothing.
+  for (const [where, entries] of [
+    ['selectedIndex', [{ id: 'e_x', label: 'B', tag: 'good' }, { id: 'e_c', label: 'C', tag: 'good' }]],
+    ['another index', [{ id: 'e_c', label: 'C', tag: 'good' }, { id: 'e_x', label: 'B', tag: 'good' }]],
+  ]) {
+    const rSharedId = await drawnBeforeRestart(entries, 0, { id: 'e_x', label: 'A' });
+    check(`sidecar: a saved winner with no row doesn't share the id of one at ${where}, and removeDrawn says it's gone`,
+      rSharedId.update?.spin.selectedEntry.id !== 'e_x' && rSharedId.removed.updates.length === 0 && rSharedId.removed.lastError === 'removeDrawn: drawn entry is already gone', JSON.stringify(rSharedId));
   }
 
   // ── Crashes chat can't reach ──
@@ -875,17 +962,23 @@ async function testSidecar() {
   // outside any try/catch. hostile() sends a command, which logs. Commands and a spin both.
   await reboot(savedConfig);
   const piped = sidecarProc; // hostile() replaces a sidecar that died
+  const atStdout = mark();
   piped.stdout.destroy();
   const { revealed: uPiped } = await drawSpin();
   for (let i = 0; i < 3; i++) { await hostile(viewerSays('addEntry Still here')); await sleep(100); }
-  check('sidecar: a closed stdout doesn\'t end the process', !!uPiped && piped.exitCode === null && sidecarProc === piped, `exit code ${piped.exitCode}`);
+  check('sidecar: a closed stdout doesn\'t end the process or raise a note', !!uPiped && piped.exitCode === null && sidecarProc === piped
+    && !client.events.slice(atStdout).some((d) => isStatus(d) && parseStatus(d).lastError.includes('failed:')), `exit code ${piped.exitCode}`);
 
   // A throw in a timer, where dispatch's try/catch can't see it. No known input causes one,
   // so tools/throw-on-log.cjs throws from a chosen log line, with no hook in the sidecar.
+  const preload = resolve(__dirname, 'tools', 'throw-on-log.cjs');
+  const noPattern = spawnSync(process.execPath, ['--require', preload, '-e', ''], { env: { ...process.env, FORTUNA_THROW_ON: undefined }, encoding: 'utf-8' });
+  check('throw-on-log: says what it needs when FORTUNA_THROW_ON is missing', noPattern.status !== 0 && noPattern.stderr.includes('FORTUNA_THROW_ON is required'), noPattern.stderr.slice(0, 300));
   const withFaults = {
-    execArgv: ['--require', resolve(__dirname, 'tools', 'throw-on-log.cjs')],
+    execArgv: ['--require', preload],
     env: { FORTUNA_THROW_ON: 'SPIN .*"BoomSpin"|REVEALED "BoomReveal"|entries CLOSED \\(time\\)' },
   };
+  const faultsOn = (env) => ({ ...withFaults, env: { ...withFaults.env, ...env } });
   const noted = (at, text) => since(at, (d) => isStatus(d) && parseStatus(d).lastError.includes(text), 1500).then((d) => d && parseStatus(d));
   const nextSpinWorks = async () => {
     const at = mark();
@@ -897,10 +990,12 @@ async function testSidecar() {
   // The reveal throws after the winner is removed: the surfaces still hear where it got to.
   await reboot({ ...savedConfig, entries: [{ id: 'e_boom', label: 'BoomReveal' }] }, withFaults);
   const atBoom = mark();
-  const { revealed: uBoom } = await drawSpin('{"removeAfter":true}');
+  const { spinning: uRevealSpin, revealed: uBoom } = await drawSpin('{"removeAfter":true}');
   const sBoom = await noted(atBoom, 'reveal failed: injected fault');
   check('sidecar: a throw in a spin\'s reveal doesn\'t end the process', sidecarProc.exitCode === null && sBoom?.spinning === false, JSON.stringify(sBoom));
   check('sidecar: that spin still reaches the overlay as revealed', uBoom?.entries.length === 0, JSON.stringify(uBoom ?? null));
+  check('sidecar: a throw before the revision was raised still raises it, once',
+    !!uBoom && uBoom.revision === uRevealSpin.revision + 1, JSON.stringify({ spinning: uRevealSpin?.revision, revealed: uBoom?.revision }));
   check('sidecar: the next spin isn\'t refused after a throw in a reveal', await nextSpinWorks(), JSON.stringify(client.events.filter(isStatus).pop()?.value));
 
   // spin() itself throws, inside dispatch's catch: the spin must not be left with no timer.
@@ -922,6 +1017,64 @@ async function testSidecar() {
   const uBoomClose = await since(atBoomClosed, (d) => isUpdate(d) && !d.entryMode.open, 1000);
   check('sidecar: a throw in an entry window\'s close doesn\'t end the process', sidecarProc.exitCode === null && sBoomClose?.entryMode.open === false, JSON.stringify(sBoomClose));
   check('sidecar: that window still reaches the overlay as closed', !!uBoomClose, 'no closed update');
+
+  // A reveal throws inside applyChange, after it raised the revision. That one change still
+  // counts once, and the surfaces still hear it.
+  await reboot({ ...savedConfig, entries: [{ id: 'e_boom', label: 'BoomPush' }] }, faultsOn({ FORTUNA_THROW_ON_UPDATE: '"BoomPush".*"state":"revealed"' }));
+  const atBoomPush = mark();
+  const { spinning: uPushSpin, revealed: uBoomPush } = await drawSpin();
+  const sBoomPush = await noted(atBoomPush, 'reveal failed: injected fault');
+  check('sidecar: a throw after the revision was raised doesn\'t raise it again',
+    !!sBoomPush && !!uBoomPush && uBoomPush.revision === uPushSpin.revision + 1, JSON.stringify({ spinning: uPushSpin?.revision, revealed: uBoomPush?.revision, note: sBoomPush?.lastError }));
+
+  // The catch's own log call throws too. The note is all that's left, and the wheel stays up.
+  await reboot({ ...savedConfig, entries: [{ id: 'e_boom', label: 'BoomNote' }] }, faultsOn({ FORTUNA_THROW_ON: 'REVEALED "BoomNote"|reveal failed' }));
+  const atBoomNote = mark();
+  await drawSpin();
+  const sBoomNote = await noted(atBoomNote, 'reveal failed: injected fault');
+  check('sidecar: a throw from the log call in a timer\'s catch doesn\'t end the process', sidecarProc.exitCode === null && sBoomNote?.spinning === false, JSON.stringify(sBoomNote));
+
+  // A V8 message can quote a value, so an error's message and a stack's first line can hold
+  // viewer text. Only escaped text and frame lines may reach the log, the error's name kept.
+  await reboot({ ...savedConfig, entries: [{ id: 'e_boom', label: 'BoomForge' }] }, faultsOn({ FORTUNA_THROW_ON: 'REVEALED "BoomForge"', FORTUNA_THROW_MESSAGE: `injected fault${FORGED}\n    at forged\u001b[2J` }));
+  const atForge = mark();
+  const atForgeLog = sidecarOut.length;
+  await drawSpin();
+  await noted(atForge, 'reveal failed: injected fault');
+  const forgeLogged = () => /\(Error\)\n\s+at /.test(sidecarOut.slice(atForgeLog));
+  for (let i = 0; i < 15 && !forgeLogged(); i++) await sleep(100);
+  const forgeLog = sidecarOut.slice(atForgeLog);
+  const forgeBadLines = forgeLog.split('\n').filter((l) => l && !/^(\[|\s+at )/.test(l));
+  check('sidecar: viewer text in an error\'s message can\'t start a log line', forgeLogged() && !/^\[2026-01-01/m.test(forgeLog) && forgeBadLines.length === 0
+    && !/[\x00-\x09\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/.test(forgeLog), JSON.stringify(forgeLog.slice(0, 500)));
+
+  // Nothing guards the path where the connection opens, so only the backstop catches this.
+  const { status: sOpenFault } = await reboot(savedConfig, faultsOn({ FORTUNA_THROW_ON: 'Connected to Streamer.bot' }), 1500);
+  const rAfterOpenFault = await hostile(viewerSays('addEntry After the open'));
+  check('sidecar: a throw as the connection opens doesn\'t end the process, and the note says so',
+    sOpenFault?.lastError.includes('injected fault') && rAfterOpenFault.alive && rAfterOpenFault.updates.at(-1)?.entries.some((e) => e.label === 'After the open'), JSON.stringify({ sOpenFault, rAfterOpenFault }));
+
+  // The same for a rejected promise nobody holds.
+  await reboot(savedConfig, faultsOn({ FORTUNA_REJECT_ON: 'command: addEntry BoomReject' }));
+  const atReject = mark();
+  const rReject = await hostile(() => cmd('addEntry', 'BoomReject'));
+  const sReject = await noted(atReject, 'injected fault');
+  check('sidecar: a rejected promise nobody holds doesn\'t end the process, and the note says so', rReject.alive && !!sReject, JSON.stringify({ rReject, sReject }));
+
+  // A closed stderr goes the way of a closed stdout: quietly, with no note for the backstop.
+  await reboot(savedConfig, faultsOn({ FORTUNA_STDERR_ON: 'command: addEntry BoomStderr' }));
+  const pipedErr = sidecarProc;
+  pipedErr.stderr.destroy();
+  const atStderr = mark();
+  for (let i = 0; i < 3; i++) { await hostile(() => cmd('addEntry', 'BoomStderr')); await sleep(100); }
+  check('sidecar: a closed stderr doesn\'t end the process or raise a note', pipedErr.exitCode === null && sidecarProc === pipedErr
+    && !client.events.slice(atStderr).some((d) => isStatus(d) && parseStatus(d).lastError.includes('failed:')), `exit code ${pipedErr.exitCode}`);
+
+  // With no wheel up yet there's nothing to keep running, so a failed startup still ends it.
+  const badStart = spawnSync(process.execPath, [resolve(__dirname, 'fortuna-sidecar.mjs')], {
+    env: { ...process.env, SB_WS_URL: WS_URL, FORTUNA_CONFIG: cfgPath, FORTUNA_GUARD_PORT: '70000' }, encoding: 'utf-8', timeout: 5000,
+  });
+  check('sidecar: a failed startup still ends the process with an error', badStart.status === 1, `exit code ${badStart.status}`);
 
   client.ws.close();
   await rm(cfgPath, { force: true });
