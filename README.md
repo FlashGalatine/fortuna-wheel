@@ -186,7 +186,7 @@ launches harmless.
 Built by **Ashe "Flash" Galatine**.
 
 - Email — [AsheJunius@gmail.com](mailto:AsheJunius@gmail.com)
-- X — [@AsheJunius](https://x.com/AsheJunius) · BlueSky — [@projectgalatine.com](https://bsky.app/profile/projectgalatine.com)
+- X — [@FlashGalatine](https://x.com/FlashGalatine) · BlueSky — [@projectgalatine.com](https://bsky.app/profile/projectgalatine.com)
 - Twitch — [FlashGalatine](https://www.twitch.tv/FlashGalatine)
 - Support — Patreon [ProjectGalatine](https://www.patreon.com/ProjectGalatine) · CashApp [$ProjectGalatine](https://cash.app/$ProjectGalatine)
 
